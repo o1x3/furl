@@ -11,6 +11,7 @@ pub mod encoding;
 pub mod errors;
 pub mod help;
 pub mod json;
+pub mod manager;
 pub mod output;
 pub mod paths;
 pub mod request;
@@ -41,11 +42,5 @@ pub fn run(program: Program) -> i32 {
 
 /// Entry point for the `furl-manager` binary.
 pub fn run_manager() -> i32 {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.iter().any(|a| a == "--version") {
-        println!("{VERSION}");
-        return 0;
-    }
-    eprintln!("furl-manager: not yet implemented");
-    1
+    manager::run()
 }
