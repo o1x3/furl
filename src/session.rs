@@ -364,9 +364,8 @@ impl Session {
                 ));
             }
             LegacyKind::Headers => {
-                message.push_str(
-                    "to make use of the latest features regarding the header layout.\n",
-                );
+                message
+                    .push_str("to make use of the latest features regarding the header layout.\n");
                 message.push_str(&format!(
                     "Use `furl-manager sessions upgrade {host} {session_id}` to update it.\n",
                 ));
@@ -495,13 +494,13 @@ impl Session {
     fn auth_value(&self) -> Value {
         match &self.auth {
             Some(auth) => {
-                let raw = auth
-                    .raw_auth
-                    .clone()
-                    .or_else(|| match (&auth.username, &auth.password) {
-                        (Some(user), Some(pass)) => Some(format!("{user}:{pass}")),
-                        _ => None,
-                    });
+                let raw =
+                    auth.raw_auth
+                        .clone()
+                        .or_else(|| match (&auth.username, &auth.password) {
+                            (Some(user), Some(pass)) => Some(format!("{user}:{pass}")),
+                            _ => None,
+                        });
                 Value::Object(vec![
                     ("type".to_string(), Value::from(auth.auth_type.clone())),
                     (
@@ -727,10 +726,7 @@ mod tests {
     fn named_session_path_uses_host_dir() {
         let config = PathBuf::from("/config");
         let path = session_path("api", "example.org", &config);
-        assert_eq!(
-            path,
-            PathBuf::from("/config/sessions/example.org/api.json")
-        );
+        assert_eq!(path, PathBuf::from("/config/sessions/example.org/api.json"));
     }
 
     #[test]
@@ -747,10 +743,7 @@ mod tests {
     fn named_session_preserves_host_case() {
         let config = PathBuf::from("/config");
         let path = session_path("api", "LOCALHOST", &config);
-        assert_eq!(
-            path,
-            PathBuf::from("/config/sessions/LOCALHOST/api.json")
-        );
+        assert_eq!(path, PathBuf::from("/config/sessions/LOCALHOST/api.json"));
     }
 
     #[test]
@@ -770,12 +763,18 @@ mod tests {
 
     #[test]
     fn bound_host_prefers_host_header() {
-        assert_eq!(bound_host(Some("h.example:9000"), "other.example"), "h.example:9000");
+        assert_eq!(
+            bound_host(Some("h.example:9000"), "other.example"),
+            "h.example:9000"
+        );
     }
 
     #[test]
     fn bound_host_strips_userinfo_keeps_port() {
-        assert_eq!(bound_host(None, "user:pw@host.example:8080"), "host.example:8080");
+        assert_eq!(
+            bound_host(None, "user:pw@host.example:8080"),
+            "host.example:8080"
+        );
     }
 
     #[test]
@@ -943,7 +942,10 @@ mod tests {
         let session = Session::from_text(source, &dummy_path(), 0).unwrap();
         assert!(session.headers_dict_layout);
         assert_eq!(session.legacy, Some(LegacyKind::Headers));
-        assert_eq!(session.headers, vec![("X-Api".to_string(), "v1".to_string())]);
+        assert_eq!(
+            session.headers,
+            vec![("X-Api".to_string(), "v1".to_string())]
+        );
         let text = session.to_json();
         assert!(text.contains("\"headers\": {"));
         assert!(text.contains("\"X-Api\": \"v1\""));
@@ -1005,7 +1007,9 @@ mod tests {
     fn legacy_warning_omits_upgrade_all_for_anonymous() {
         let source = "{\"headers\": {\"X\": \"v\"}}";
         let session = Session::from_text(source, &dummy_path(), 0).unwrap();
-        let warning = session.legacy_warning("/tmp/s.json", "host", false).unwrap();
+        let warning = session
+            .legacy_warning("/tmp/s.json", "host", false)
+            .unwrap();
         assert!(!warning.contains("upgrade-all"));
         assert!(warning.contains("/tmp/s.json"));
     }
@@ -1091,8 +1095,7 @@ mod tests {
 
     #[test]
     fn old_style_auth_read_and_collapsed_to_raw_on_write() {
-        let source =
-            "{\"auth\": {\"type\": \"basic\", \"username\": \"u\", \"password\": \"p\"}}";
+        let source = "{\"auth\": {\"type\": \"basic\", \"username\": \"u\", \"password\": \"p\"}}";
         let session = Session::from_text(source, &dummy_path(), 0).unwrap();
         let auth = session.auth().unwrap();
         assert_eq!(auth.username.as_deref(), Some("u"));
@@ -1250,7 +1253,10 @@ mod tests {
         let path = session_path("api", "example.org", dir.path());
         Session::new().save(&path).unwrap();
         let sessions_dir = dir.path().join("sessions").join("example.org");
-        let mode = std::fs::metadata(&sessions_dir).unwrap().permissions().mode();
+        let mode = std::fs::metadata(&sessions_dir)
+            .unwrap()
+            .permissions()
+            .mode();
         assert_eq!(mode & 0o777, 0o700);
     }
 

@@ -34,6 +34,10 @@ pub struct PreparedRequest {
     /// `--path-as-is`: the original path replaces the normalized one.
     pub path_override: Option<String>,
     pub headers: WireHeaders,
+    /// The application-layer headers (User-Agent, Accept, Content-Type,
+    /// session, and CLI headers) — what a session persists, excluding the
+    /// engine-synthesized Accept-Encoding/Connection/Host.
+    pub app_headers: Vec<(String, String)>,
     pub body: Option<Body>,
     pub chunked: bool,
 }
@@ -81,6 +85,11 @@ pub struct BuildContext<'a> {
     /// The default scheme after program-variant forcing.
     pub default_scheme: &'a str,
     pub version: &'a str,
+    /// Session-stored headers, applied between defaults and CLI headers.
+    pub session_headers: &'a [(String, String)],
+    /// Session-stored authorization header, applied when the invocation
+    /// carries no `-a`/URL credentials of its own.
+    pub session_authorization: Option<String>,
 }
 
 pub fn build(context: &BuildContext<'_>) -> Result<PreparedRequest, BuildError> {
@@ -237,6 +246,12 @@ pub fn build(context: &BuildContext<'_>) -> Result<PreparedRequest, BuildError> 
         }
     }
 
+    // Session headers sit between defaults and CLI headers: a session
+    // value overrides a default, and a CLI value overrides the session.
+    for (name, value) in context.session_headers {
+        app_headers.set(name, value);
+    }
+
     app_headers.apply_cli_items(&items.headers);
 
     // The multipart type is decided after the CLI overlay. Only a
@@ -267,7 +282,10 @@ pub fn build(context: &BuildContext<'_>) -> Result<PreparedRequest, BuildError> 
 
     // -- Wire headers + auth ---------------------------------------------------
     let body_length = built_body.as_ref().map(|b| b.bytes.len() as u64);
+    // CLI/URL credentials win; the session's authorization applies only
+    // when the invocation carries none.
     let authorization = resolve_authorization(args, userinfo.as_ref())?
+        .or_else(|| context.session_authorization.clone())
         .filter(|_| !app_headers.contains("Authorization"));
     let wire = headers::assemble(
         &app_headers,
@@ -277,12 +295,18 @@ pub fn build(context: &BuildContext<'_>) -> Result<PreparedRequest, BuildError> 
         authorization,
     );
 
+    let app_header_pairs = app_headers
+        .pairs()
+        .map(|(n, v)| (n.to_string(), v.to_string()))
+        .collect();
+
     Ok(PreparedRequest {
         method,
         url,
         host_netloc,
         path_override: original_path,
         headers: wire,
+        app_headers: app_header_pairs,
         body: built_body,
         chunked: args.chunked,
     })

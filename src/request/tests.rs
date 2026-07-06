@@ -23,6 +23,8 @@ fn prepared_with_stdin(
         items: &items,
         stdin_body: stdin.map(|b| b.to_vec()),
         default_scheme: "http",
+        session_headers: &[],
+        session_authorization: None,
         version: "0.1.0",
     })
 }

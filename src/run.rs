@@ -3,7 +3,7 @@
 use std::io::{IsTerminal, Read, Write};
 
 use crate::cli::args::ParsedArgs;
-use crate::cli::items::process_items;
+use crate::cli::items::{RequestItems, process_items};
 use crate::cli::parser::{Outcome, UsageError, parse};
 use crate::cookies::Jar;
 use crate::errors::{runtime_error_line, usage_error_block};
@@ -235,14 +235,27 @@ fn execute(
         None
     };
 
-    // -- Build ------------------------------------------------------------------
+    // -- Session load -----------------------------------------------------------
     let scheme = default_scheme(program, args);
+    let mut session_state = SessionState::open(program_name, args, &items, scheme)?;
+    let session_headers = session_state
+        .as_ref()
+        .map(|s| s.session.headers().to_vec())
+        .unwrap_or_default();
+    let session_authorization = session_state
+        .as_ref()
+        .and_then(|s| s.session.auth())
+        .and_then(session_auth_header);
+
+    // -- Build ------------------------------------------------------------------
     let request = build(&BuildContext {
         args,
         items: &items,
         stdin_body,
         default_scheme: scheme,
         version: VERSION,
+        session_headers: &session_headers,
+        session_authorization,
     })
     .map_err(|error| match error {
         BuildError::Usage(message) => Failure::Usage(message),
@@ -300,10 +313,14 @@ fn execute(
             handle.write_all(b"\n\n").ok();
         }
         handle.flush().ok();
+        // Offline runs still persist request headers and auth (no cookies).
+        if let Some(state) = &mut session_state {
+            state.save(&request, &items, args, None);
+        }
         return Ok(ExitStatus::Success);
     }
 
-    execute_online(args, request, format)
+    execute_online(args, request, format, &items, session_state)
 }
 
 const BINARY_NOTICE: &[u8] = b"+-----------------------------------------+\n\
@@ -604,6 +621,8 @@ fn execute_online(
     args: &ParsedArgs,
     request: PreparedRequest,
     format: FormatContext,
+    items: &RequestItems,
+    mut session_state: Option<SessionState>,
 ) -> Result<ExitStatus, Failure> {
     let options = TransportOptions {
         timeout: (args.timeout > 0.0).then(|| std::time::Duration::from_secs_f64(args.timeout)),
@@ -651,7 +670,23 @@ fn execute_online(
     };
 
     let mut jar = Jar::new();
+    // Seed the jar with the session's stored cookies, and put them on the
+    // first request's Cookie header.
+    if let Some(state) = &session_state {
+        state.session.load_into_jar(&mut jar);
+    }
     let mut current = request;
+    if let Some(value) = jar.header_for(
+        current.url.scheme(),
+        current.url.host_str().unwrap_or_default(),
+        current.url.path(),
+    ) {
+        current
+            .headers
+            .entries
+            .retain(|(name, _)| !name.eq_ignore_ascii_case("cookie"));
+        current.headers.entries.push(("Cookie".to_string(), value));
+    }
     // The initial download URL drives the fallback filename.
     let download_url = current.url.clone();
     let resume_offset = download_resume_offset(args);
@@ -767,6 +802,9 @@ fn execute_online(
             if args.download && exit == ExitStatus::Success {
                 write_download(args, &current, &download_url, &response, resume_offset)?;
             }
+            if let Some(state) = &mut session_state {
+                state.save(&current, items, args, Some(&jar));
+            }
             return Ok(exit);
         }
         hops += 1;
@@ -862,6 +900,147 @@ fn default_scheme(program: Program, args: &ParsedArgs) -> &str {
         Program::Furls => "https",
         Program::Furl => args.default_scheme.as_str(),
     }
+}
+
+/// The current wall-clock time in epoch seconds, for cookie expiry.
+fn now_epoch() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// A loaded `--session` / `--session-read-only` and where to persist it.
+struct SessionState {
+    session: crate::session::Session,
+    path: std::path::PathBuf,
+    read_only: bool,
+    existed_before: bool,
+}
+
+impl SessionState {
+    /// Resolve and load the session named by the CLI, if any. A missing
+    /// file loads an empty session; a corrupt file is fatal.
+    fn open(
+        program_name: &str,
+        args: &ParsedArgs,
+        items: &RequestItems,
+        scheme: &str,
+    ) -> Result<Option<SessionState>, Failure> {
+        let (name, read_only) = match (&args.session, &args.session_read_only) {
+            (Some(name), _) => (name.clone(), false),
+            (None, Some(name)) => (name.clone(), true),
+            (None, None) => return Ok(None),
+        };
+
+        let host_header = items
+            .headers
+            .iter()
+            .find(|h| h.name.eq_ignore_ascii_case("host"))
+            .and_then(|h| h.value.clone());
+        let netloc = crate::request::host_for_prompt(&args.url, scheme);
+        let bound = crate::session::bound_host(host_header.as_deref(), &netloc);
+
+        let has_separator =
+            name.contains(std::path::MAIN_SEPARATOR) || (cfg!(windows) && name.contains('/'));
+        let path = if has_separator {
+            crate::paths::expand_tilde(&name)
+        } else {
+            crate::session::session_path(&name, &bound, &crate::config::config_dir())
+        };
+
+        let existed_before = path.exists();
+        let session = if existed_before {
+            crate::session::Session::load(&path, now_epoch())
+                .map_err(|error| Failure::runtime("SessionError", error.to_string()))?
+        } else {
+            crate::session::Session::new()
+        };
+
+        let session_id = if has_separator {
+            name.clone()
+        } else {
+            crate::session::port_stripped_host(&bound).to_string()
+        };
+        if let Some(warning) = session.legacy_warning(&session_id, &bound, !has_separator) {
+            eprintln!("{program_name}: warning: {warning}");
+        }
+
+        Ok(Some(SessionState {
+            session,
+            path,
+            read_only,
+            existed_before,
+        }))
+    }
+
+    /// Persist the session after the exchange, if it should be saved.
+    fn save(
+        &mut self,
+        request: &PreparedRequest,
+        items: &RequestItems,
+        args: &ParsedArgs,
+        jar: Option<&Jar>,
+    ) {
+        if !crate::session::should_save(self.read_only, self.existed_before) {
+            return;
+        }
+        let unset: Vec<String> = items
+            .headers
+            .iter()
+            .filter(|h| h.value.is_none())
+            .map(|h| h.name.clone())
+            .collect();
+        // Persist the application-layer headers only: the engine's
+        // Accept-Encoding/Connection/Host are not part of a session.
+        self.session
+            .update_headers_from_request(&request.app_headers, &unset);
+        if let Some(jar) = jar {
+            self.session.update_cookies_from_jar(jar, now_epoch());
+        }
+        if let Some(auth) = resolved_session_auth(args) {
+            self.session.set_auth(auth);
+        }
+        if let Err(error) = self.session.save(&self.path) {
+            eprintln!("furl: warning: could not save session: {error}");
+        }
+    }
+}
+
+/// The Authorization header a stored session auth record produces.
+fn session_auth_header(auth: &crate::session::SessionAuth) -> Option<String> {
+    let raw = auth
+        .raw_auth
+        .clone()
+        .or_else(|| match (&auth.username, &auth.password) {
+            (Some(u), Some(p)) => Some(format!("{u}:{p}")),
+            _ => None,
+        })?;
+    match auth.auth_type.as_str() {
+        "basic" => {
+            let (user, password) = crate::request::split_credentials(&raw);
+            Some(crate::request::basic_authorization(
+                &user,
+                &password.unwrap_or_default(),
+            ))
+        }
+        "bearer" => Some(format!("Bearer {raw}")),
+        _ => None,
+    }
+}
+
+/// The auth record to store when the invocation resolved credentials.
+fn resolved_session_auth(args: &ParsedArgs) -> Option<crate::session::SessionAuth> {
+    let raw = args.auth.clone()?;
+    Some(crate::session::SessionAuth {
+        auth_type: args
+            .auth_type
+            .clone()
+            .unwrap_or_else(|| "basic".to_string()),
+        raw_auth: Some(raw),
+        username: None,
+        password: None,
+    })
 }
 
 fn guess_method(has_input_data: bool, has_data_items: bool) -> String {
