@@ -269,11 +269,27 @@ enum Sink {
     Null,
 }
 
+/// The sections a message may print.
+#[derive(Default)]
+struct Message {
+    head: Option<String>,
+    /// `Some` when the body section is selected (bytes may be empty).
+    body: Option<Vec<u8>>,
+    /// `Some(elapsed_text)` when the meta section is selected.
+    meta: Option<String>,
+}
+
 /// Writes messages with the separator rules of the output pipeline.
 struct Emitter {
     sink: Sink,
     tty: bool,
-    previous_printed_body: bool,
+    /// The previous message selected its body section (drives the piped
+    /// inter-message separator, even when the body was empty).
+    previous_had_body: bool,
+    /// A streamed request-body upload on a terminal forces the next
+    /// separator even in tty mode.
+    force_separator: bool,
+    started: bool,
 }
 
 impl Emitter {
@@ -290,36 +306,52 @@ impl Emitter {
         }
     }
 
-    /// One message: optional head block, optional body.
-    fn message(&mut self, head: Option<&str>, body: Option<&[u8]>) {
-        let body_bytes = body.unwrap_or_default();
-        let prints_body = body.is_some() && !body_bytes.is_empty();
-        if head.is_none() && !prints_body {
-            return;
-        }
-        if self.previous_printed_body && !self.tty {
+    /// Emit one message. Every message in the exchange stream passes
+    /// through here — even ones that print nothing — because each updates
+    /// the body-carry state that drives the inter-message separator.
+    fn message(&mut self, message: Message) {
+        let prints_anything =
+            message.head.is_some() || message.body.is_some() || message.meta.is_some();
+        // Inter-message separator: before a printing message when the
+        // previous message selected a body section, if piped (or forced
+        // by a streamed upload on a terminal).
+        if self.previous_had_body && prints_anything && (self.force_separator || !self.tty) {
             self.write(b"\n\n");
         }
-        if let Some(head) = head {
-            self.write(head.as_bytes());
+        self.force_separator = false;
+
+        if let Some(head) = &message.head {
+            self.write(head.clone().as_bytes());
             self.write(b"\r\n\r\n");
         }
-        if prints_body {
-            // Binary suppression is mode-gated; the interim pipeline
-            // treats the terminal as a non-raw stream.
-            if self.tty && body_bytes.contains(&0) {
-                if head.is_some() {
-                    self.write(b"\n");
+
+        let mut printed_bytes = false;
+        if let Some(body) = &message.body {
+            if !body.is_empty() {
+                if self.tty && body.contains(&0) {
+                    if message.head.is_some() {
+                        self.write(b"\n");
+                    }
+                    self.write(BINARY_NOTICE);
+                } else {
+                    self.write(body);
                 }
-                self.write(BINARY_NOTICE);
-            } else {
-                self.write(body_bytes);
+                printed_bytes = true;
             }
         }
-        if self.tty && prints_body {
+
+        if let Some(elapsed) = &message.meta {
+            self.write(format!("\n\nElapsed time: {elapsed}\n\n").as_bytes());
+        } else if self.tty && printed_bytes {
+            // On a terminal, a body-printing message ends with a blank
+            // line (unless meta already supplied its trailing separator).
             self.write(b"\n\n");
         }
-        self.previous_printed_body = prints_body;
+
+        // The body section being *selected* carries the separator, even
+        // when the body was empty.
+        self.previous_had_body = message.body.is_some();
+        self.started = true;
     }
 
     fn finish(&mut self) {
@@ -389,6 +421,12 @@ fn transport_failure(error: TransportError, timeout: f64) -> Failure {
 
 fn is_redirect_status(status: u16) -> bool {
     matches!(status, 301 | 302 | 303 | 307 | 308)
+}
+
+/// The meta section's elapsed-time value: whole seconds with a
+/// nine-digit fractional part, then `s` (e.g. `0.004482167s`).
+fn format_elapsed(elapsed: std::time::Duration) -> String {
+    format!("{}.{:09}s", elapsed.as_secs(), elapsed.subsec_nanos())
 }
 
 /// Rewrite the request for the next hop of a redirect chain.
@@ -487,15 +525,19 @@ fn execute_online(args: &ParsedArgs, request: PreparedRequest) -> Result<ExitSta
     let mut emitter = Emitter {
         sink,
         tty,
-        previous_printed_body: false,
+        previous_had_body: false,
+        force_separator: false,
+        started: false,
     };
 
     let mut jar = Jar::new();
     let mut current = request;
     let mut hops: i64 = 0;
     loop {
+        let started_at = std::time::Instant::now();
         let response =
             transport::send(&current, &options).map_err(|e| transport_failure(e, args.timeout))?;
+        let elapsed = started_at.elapsed();
 
         let host = current.url.host_str().unwrap_or_default().to_string();
         for (name, value) in &response.headers {
@@ -520,8 +562,11 @@ fn execute_online(args: &ParsedArgs, request: PreparedRequest) -> Result<ExitSta
         }
         let is_final = !wants_redirect;
 
-        if is_final || show_all {
-            let request_head = letters.contains('H').then(|| {
+        // The request message is always in the stream — intermediary
+        // requests print (when H/B are selected) even without --all, and
+        // every message updates the inter-message separator state.
+        emitter.message(Message {
+            head: letters.contains('H').then(|| {
                 String::from_utf8_lossy(&render_request(
                     &current,
                     RequestParts {
@@ -531,23 +576,29 @@ fn execute_online(args: &ParsedArgs, request: PreparedRequest) -> Result<ExitSta
                 ))
                 .trim_end_matches("\r\n\r\n")
                 .to_string()
-            });
-            let request_body = letters.contains('B').then(|| {
+            }),
+            body: letters.contains('B').then(|| {
                 current
                     .body
                     .as_ref()
                     .map(|b| b.bytes.clone())
                     .unwrap_or_default()
-            });
-            emitter.message(request_head.as_deref(), request_body.as_deref());
+            }),
+            meta: None,
+        });
 
-            let response_head = letters
-                .contains('h')
-                .then(|| render_response_head(&response));
-            let response_body = letters
-                .contains('b')
-                .then(|| transport::decoded_body(&response));
-            emitter.message(response_head.as_deref(), response_body.as_deref());
+        // Intermediary responses print only with --all; the final one
+        // always does.
+        if is_final || show_all {
+            emitter.message(Message {
+                head: letters
+                    .contains('h')
+                    .then(|| render_response_head(&response)),
+                body: letters
+                    .contains('b')
+                    .then(|| transport::decoded_body(&response)),
+                meta: letters.contains('m').then(|| format_elapsed(elapsed)),
+            });
         }
 
         if is_final {
