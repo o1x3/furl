@@ -57,6 +57,11 @@ Initial release.
   reindent JSON and XML bodies and sort headers (color highlighting is planned).
 - `furl-manager cli export-args` emits a machine-readable description of the
   request parser; `furl-manager` also reports plugin and update-check status.
+- ANSI color highlighting of headers and JSON bodies (`--pretty=colors`/`all`,
+  `--style`), byte-exact with the reference for the `auto` and pie styles.
+- `.netrc` credential lookup as an authentication fallback.
+- Online HTTP Digest authentication (`-A digest`), answering a 401 challenge
+  with a computed `Authorization: Digest` retry.
 
 [Unreleased]: https://github.com/o1x3/furl/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/o1x3/furl/releases/tag/v0.1.0

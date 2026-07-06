@@ -51,18 +51,23 @@ furl corrects a handful of long-standing edge-case behaviors:
   implementations because furl uses a pure-Rust DEFLATE encoder. Any server
   decodes furl's body to the identical payload.
 
+## Partial parity
+
+- **Non-JSON body coloring.** furl colorizes JSON response bodies (byte-exact
+  with the reference across the `auto` and pie styles) but ships only a JSON
+  lexer. Bodies whose type selects a different lexer (HTML, JavaScript, CSS, …)
+  are shown uncolored rather than highlighted with a language-specific scheme.
+  Declining to color is closer to the reference than mis-coloring, but it is not
+  full parity for those content types.
+- **256-color named styles.** The `auto` (8/16-color) and `pie` family
+  (`pie`, `pie-dark`, `pie-light`) styles are byte-exact. Other named 256-color
+  styles (`monokai`, `solarized`, …) are approximated.
+
 ## Under construction
 
-These are recognized where applicable but not yet at parity. They are tracked and
-intended for a future release:
+These are recognized where applicable but not yet at parity, tracked for a
+future release:
 
-- **Output colors and formatting** — `--pretty`, `--style`, JSON/XML
-  reformatting, header sorting, binary-response conversion. Note: when output is
-  piped the default is no formatting, so piped output is already byte-correct;
-  the gap is terminal formatting only.
-- **Downloads** — `--download`, `--continue`.
-- **Sessions** — `--session`, `--session-read-only`.
-- **Config-file `default_options`.**
-- **`.netrc` credential loading.**
-- **Full online Digest authentication flow.**
-- **`furl-manager` subcommands** and man pages.
+- **`furl-manager sessions upgrade`** (the command reports that it is not yet
+  implemented).
+- **The slow-stdin read warning** and **`SIGINT`/`SIGPIPE`** signal handling.
