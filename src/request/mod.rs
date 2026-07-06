@@ -1,6 +1,7 @@
 //! Building a request from parsed arguments and processed items.
 
 pub mod body;
+pub mod digest;
 pub mod headers;
 pub mod urlencode;
 

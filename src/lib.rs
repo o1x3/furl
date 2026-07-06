@@ -11,6 +11,7 @@ pub mod encoding;
 pub mod errors;
 pub mod help;
 pub mod json;
+pub mod netrc;
 pub mod manager;
 pub mod output;
 pub mod paths;
