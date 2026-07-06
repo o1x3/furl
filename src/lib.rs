@@ -7,6 +7,7 @@ pub mod cli;
 pub mod encoding;
 pub mod json;
 pub mod paths;
+pub mod request;
 pub mod status;
 
 /// The furl version, taken from the crate metadata.
