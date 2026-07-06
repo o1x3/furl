@@ -676,6 +676,27 @@ fn type_error_key_access_on_nested_array_names_prefix() {
 }
 
 #[test]
+fn type_error_prefix_doubles_literal_backslashes() {
+    // Escaped brackets in keys are not re-escaped in the prefix, but
+    // literal backslashes render doubled.
+    assert_eq!(
+        err_message(&[(r"\d", json!(1.5)), (r"\d[-1]", json!(true))]),
+        concat!(
+            r"furl Type Error: Cannot perform 'index' based access on '\\d' ",
+            "which has a type of 'number' but this operation requires a type of 'array'."
+        )
+    );
+    // Key "\x" (from the escaped backslash) renders as "\\x".
+    assert_eq!(
+        err_message(&[(r"a[\\x]", json!(1)), (r"a[\\x][y]", json!(2))]),
+        concat!(
+            r"furl Type Error: Cannot perform 'key' based access on 'a[\\x]' ",
+            "which has a type of 'number' but this operation requires a type of 'object'."
+        )
+    );
+}
+
+#[test]
 fn value_error_negative_index() {
     assert_eq!(
         err(&[("foo[-10]", json!([1, 2]))]),

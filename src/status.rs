@@ -56,14 +56,8 @@ mod tests {
             ExitStatus::from_http_status(301, false),
             ExitStatus::ErrorHttp3xx
         );
-        assert_eq!(
-            ExitStatus::from_http_status(301, true),
-            ExitStatus::Success
-        );
-        assert_eq!(
-            ExitStatus::from_http_status(304, true),
-            ExitStatus::Success
-        );
+        assert_eq!(ExitStatus::from_http_status(301, true), ExitStatus::Success);
+        assert_eq!(ExitStatus::from_http_status(304, true), ExitStatus::Success);
         assert_eq!(
             ExitStatus::from_http_status(404, false),
             ExitStatus::ErrorHttp4xx

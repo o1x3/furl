@@ -197,16 +197,37 @@ mod tests {
 
     #[test]
     fn basic_separators() {
-        assert_eq!(split("X-Hdr:v"), ("X-Hdr".into(), Separator::Header, "v".into()));
-        assert_eq!(split("name;"), ("name".into(), Separator::HeaderEmpty, "".into()));
-        assert_eq!(split("X:@f"), ("X".into(), Separator::HeaderFromFile, "f".into()));
+        assert_eq!(
+            split("X-Hdr:v"),
+            ("X-Hdr".into(), Separator::Header, "v".into())
+        );
+        assert_eq!(
+            split("name;"),
+            ("name".into(), Separator::HeaderEmpty, "".into())
+        );
+        assert_eq!(
+            split("X:@f"),
+            ("X".into(), Separator::HeaderFromFile, "f".into())
+        );
         assert_eq!(split("q==1"), ("q".into(), Separator::Query, "1".into()));
-        assert_eq!(split("q==@f"), ("q".into(), Separator::QueryFromFile, "f".into()));
+        assert_eq!(
+            split("q==@f"),
+            ("q".into(), Separator::QueryFromFile, "f".into())
+        );
         assert_eq!(split("d=1"), ("d".into(), Separator::Data, "1".into()));
-        assert_eq!(split("d=@f"), ("d".into(), Separator::DataFromFile, "f".into()));
+        assert_eq!(
+            split("d=@f"),
+            ("d".into(), Separator::DataFromFile, "f".into())
+        );
         assert_eq!(split("j:=1"), ("j".into(), Separator::RawJson, "1".into()));
-        assert_eq!(split("j:=@f"), ("j".into(), Separator::RawJsonFromFile, "f".into()));
-        assert_eq!(split("f@p"), ("f".into(), Separator::FileUpload, "p".into()));
+        assert_eq!(
+            split("j:=@f"),
+            ("j".into(), Separator::RawJsonFromFile, "f".into())
+        );
+        assert_eq!(
+            split("f@p"),
+            ("f".into(), Separator::FileUpload, "p".into())
+        );
     }
 
     #[test]
@@ -228,7 +249,10 @@ mod tests {
             split("a@b==c"),
             ("a".into(), Separator::FileUpload, "b==c".into())
         );
-        assert_eq!(split("a==b==c"), ("a".into(), Separator::Query, "b==c".into()));
+        assert_eq!(
+            split("a==b==c"),
+            ("a".into(), Separator::Query, "b==c".into())
+        );
     }
 
     #[test]
@@ -285,7 +309,10 @@ mod tests {
         assert_eq!(split("=x"), ("".into(), Separator::Data, "x".into()));
         assert_eq!(split("==y"), ("".into(), Separator::Query, "y".into()));
         assert_eq!(split("a:"), ("a".into(), Separator::Header, "".into()));
-        assert_eq!(split("a;junk"), ("a".into(), Separator::HeaderEmpty, "junk".into()));
+        assert_eq!(
+            split("a;junk"),
+            ("a".into(), Separator::HeaderEmpty, "junk".into())
+        );
         assert_eq!(split("@f"), ("".into(), Separator::FileUpload, "f".into()));
     }
 

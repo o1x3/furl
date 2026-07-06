@@ -144,16 +144,18 @@ fn type_error(
     }
 }
 
-/// Reconstruct the path up to the offending segment for error messages,
-/// from decoded accessors (escapes are not re-applied).
+/// Reconstruct the path up to the offending segment for error messages.
+///
+/// Accessors render decoded except that literal backslashes are doubled;
+/// brackets that were escaped in the source are not re-escaped.
 fn render_prefix(segments: &[Segment]) -> String {
     use std::fmt::Write;
     let mut out = String::new();
     for (i, segment) in segments.iter().enumerate() {
         match &segment.kind {
-            SegmentKind::Key(k) if i == 0 => out.push_str(k),
+            SegmentKind::Key(k) if i == 0 => out.push_str(&k.replace('\\', "\\\\")),
             SegmentKind::Key(k) => {
-                let _ = write!(out, "[{k}]");
+                let _ = write!(out, "[{}]", k.replace('\\', "\\\\"));
             }
             SegmentKind::Index { value, .. } => {
                 let _ = write!(out, "[{value}]");

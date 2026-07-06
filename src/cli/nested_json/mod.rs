@@ -13,6 +13,8 @@ mod lexer;
 mod parser;
 
 #[cfg(test)]
+mod proptests;
+#[cfg(test)]
 mod tests;
 
 use serde_json::Value;
