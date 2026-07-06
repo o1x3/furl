@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use rustls::{ClientConfig, ClientConnection, StreamOwned};
 use rustls_pki_types::ServerName;
+use rustls_pki_types::pem::PemObject;
 
 use super::TransportError;
 
@@ -100,10 +101,9 @@ fn client_config(options: &TlsOptions) -> Result<ClientConfig, TransportError> {
                     path.display()
                 ))
             })?;
-            let certs: Result<Vec<_>, _> = rustls_pemfile::certs(&mut bundle.as_slice()).collect();
-            let certs = certs
-                .map_err(|error| TransportError::Tls(format!("invalid CA bundle: {error}")))?;
-            for cert in certs {
+            for cert in rustls_pki_types::CertificateDer::pem_slice_iter(&bundle) {
+                let cert = cert
+                    .map_err(|error| TransportError::Tls(format!("invalid CA bundle: {error}")))?;
                 roots
                     .add(cert)
                     .map_err(|error| TransportError::Tls(error.to_string()))?;
@@ -119,16 +119,13 @@ fn client_config(options: &TlsOptions) -> Result<ClientConfig, TransportError> {
                 TransportError::Tls(format!("{}: {error}", cert_path.display()))
             })?;
             let certs: Result<Vec<_>, _> =
-                rustls_pemfile::certs(&mut cert_bytes.as_slice()).collect();
+                rustls_pki_types::CertificateDer::pem_slice_iter(&cert_bytes).collect();
             let certs = certs
                 .map_err(|error| TransportError::Tls(format!("invalid client cert: {error}")))?;
             let key_bytes = std::fs::read(key_path)
                 .map_err(|error| TransportError::Tls(format!("{}: {error}", key_path.display())))?;
-            let key = rustls_pemfile::private_key(&mut key_bytes.as_slice())
-                .map_err(|error| TransportError::Tls(format!("invalid client key: {error}")))?
-                .ok_or_else(|| {
-                    TransportError::Tls(format!("no private key found in {}", key_path.display()))
-                })?;
+            let key = rustls_pki_types::PrivateKeyDer::from_pem_slice(&key_bytes)
+                .map_err(|error| TransportError::Tls(format!("invalid client key: {error}")))?;
             builder
                 .with_client_auth_cert(certs, key)
                 .map_err(|error| TransportError::Tls(error.to_string()))?
