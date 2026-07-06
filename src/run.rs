@@ -257,10 +257,42 @@ fn execute(
         )),
     })?;
 
+    // Output formatting is resolved once — a malformed --format-options
+    // is a usage error even in offline mode.
+    let stdout_tty = std::io::stdout().is_terminal();
+    let format_tty = stdout_tty && args.output.is_none() && !args.download;
+    let format = FormatContext {
+        mode: crate::output::format::PrettyMode::resolve(args.pretty.as_deref(), format_tty),
+        options: crate::output::format::FormatOptions::from_occurrences(&args.format_options)
+            .map_err(Failure::Usage)?,
+        explicit_json: args.request_type == Some(crate::cli::args::RequestType::Json),
+        response_mime: args.response_mime.clone(),
+    };
+
     // -- Offline execution ---------------------------------------------------------
     if args.offline {
         let parts = offline_parts(args);
-        let rendered = render_request(&request, parts);
+        let mut rendered: Vec<u8> = Vec::new();
+        if parts.headers {
+            let head = String::from_utf8_lossy(&render_request(
+                &request,
+                RequestParts {
+                    headers: true,
+                    body: false,
+                },
+            ))
+            .trim_end_matches("\r\n\r\n")
+            .to_string();
+            rendered.extend_from_slice(format.head(&head).as_bytes());
+            rendered.extend_from_slice(b"\r\n\r\n");
+        }
+        if parts.body {
+            if let Some(body) = &request.body {
+                let content_type = request.headers.get("Content-Type").map(str::to_string);
+                rendered
+                    .extend_from_slice(&format.body(body.bytes.clone(), content_type.as_deref()));
+            }
+        }
         let stdout = std::io::stdout();
         let mut handle = stdout.lock();
         handle.write_all(&rendered).ok();
@@ -271,7 +303,7 @@ fn execute(
         return Ok(ExitStatus::Success);
     }
 
-    execute_online(args, request)
+    execute_online(args, request, format)
 }
 
 const BINARY_NOTICE: &[u8] = b"+-----------------------------------------+\n\
@@ -529,7 +561,50 @@ fn rebuild_for_redirect(
     Ok(request)
 }
 
-fn execute_online(args: &ParsedArgs, request: PreparedRequest) -> Result<ExitStatus, Failure> {
+/// The resolved output-formatting configuration for one run.
+struct FormatContext {
+    mode: crate::output::format::PrettyMode,
+    options: crate::output::format::FormatOptions,
+    explicit_json: bool,
+    response_mime: Option<String>,
+}
+
+impl FormatContext {
+    /// Sort a rendered head block's header lines when the format group is
+    /// active (leaves it untouched otherwise).
+    fn head(&self, rendered: &str) -> String {
+        if crate::output::format::format_group_active(self.mode) {
+            crate::output::format::sort_header_lines(rendered, &self.options)
+        } else {
+            rendered.to_string()
+        }
+    }
+
+    /// Reformat a body per the active format group, decoding lossily for
+    /// the formatter and re-encoding to bytes.
+    fn body(&self, bytes: Vec<u8>, content_type: Option<&str>) -> Vec<u8> {
+        if !crate::output::format::format_group_active(self.mode) {
+            return bytes;
+        }
+        let text = String::from_utf8_lossy(&bytes);
+        let mime =
+            crate::output::format::effective_mime(content_type, self.response_mime.as_deref());
+        crate::output::format::format_body(
+            &text,
+            mime.as_deref(),
+            self.explicit_json,
+            &self.options,
+            self.mode,
+        )
+        .into_bytes()
+    }
+}
+
+fn execute_online(
+    args: &ParsedArgs,
+    request: PreparedRequest,
+    format: FormatContext,
+) -> Result<ExitStatus, Failure> {
     let options = TransportOptions {
         timeout: (args.timeout > 0.0).then(|| std::time::Duration::from_secs_f64(args.timeout)),
         tls: resolve_tls(args),
@@ -630,24 +705,27 @@ fn execute_online(args: &ParsedArgs, request: PreparedRequest) -> Result<ExitSta
         // The request message is always in the stream — intermediary
         // requests print (when H/B are selected) even without --all, and
         // every message updates the inter-message separator state.
+        let request_content_type = current.headers.get("Content-Type").map(str::to_string);
         emitter.message(Message {
             head: letters.contains('H').then(|| {
-                String::from_utf8_lossy(&render_request(
-                    &current,
-                    RequestParts {
-                        headers: true,
-                        body: false,
-                    },
-                ))
-                .trim_end_matches("\r\n\r\n")
-                .to_string()
+                format.head(
+                    String::from_utf8_lossy(&render_request(
+                        &current,
+                        RequestParts {
+                            headers: true,
+                            body: false,
+                        },
+                    ))
+                    .trim_end_matches("\r\n\r\n"),
+                )
             }),
             body: letters.contains('B').then(|| {
-                current
+                let bytes = current
                     .body
                     .as_ref()
                     .map(|b| b.bytes.clone())
-                    .unwrap_or_default()
+                    .unwrap_or_default();
+                format.body(bytes, request_content_type.as_deref())
             }),
             meta: None,
         });
@@ -655,13 +733,17 @@ fn execute_online(args: &ParsedArgs, request: PreparedRequest) -> Result<ExitSta
         // Intermediary responses print only with --all; the final one
         // always does.
         if is_final || show_all {
+            let response_content_type = response.header("Content-Type");
             emitter.message(Message {
                 head: letters
                     .contains('h')
-                    .then(|| render_response_head(&response)),
-                body: letters
-                    .contains('b')
-                    .then(|| transport::decoded_body(&response)),
+                    .then(|| format.head(&render_response_head(&response))),
+                body: letters.contains('b').then(|| {
+                    format.body(
+                        transport::decoded_body(&response),
+                        response_content_type.as_deref(),
+                    )
+                }),
                 meta: letters.contains('m').then(|| format_elapsed(elapsed)),
             });
         }

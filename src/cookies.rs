@@ -7,10 +7,25 @@ pub struct Cookie {
     pub value: String,
     /// The cookie's domain: the setting host, or the `Domain` attribute
     /// (which additionally allows subdomains).
+    ///
+    /// An empty string means "unbound" — the cookie matches any host. This
+    /// arises only from session files (a legacy insecure cookie stored with
+    /// no domain, or `domain: null`); cookies created from a `Set-Cookie`
+    /// response always carry the setting host.
     pub domain: String,
     /// True when a `Domain` attribute was present.
     pub domain_attribute: bool,
+    /// True when the session record stored `domain: null` rather than an
+    /// empty string. Both an empty domain and a null domain match any host;
+    /// the marker exists only so a session round-trips the on-disk form
+    /// faithfully (null back to null, `""` back to `""`) and so the
+    /// legacy-upgrade warning can distinguish the two.
+    pub explicit_none_domain: bool,
     pub path: String,
+    /// Absolute expiry in epoch seconds, or `None` for a session cookie
+    /// (no persistent lifetime). Sessions persist this; a cookie parsed
+    /// from a bare `Set-Cookie` line is a session cookie.
+    pub expires: Option<u64>,
     pub secure: bool,
 }
 
@@ -54,12 +69,32 @@ impl Jar {
     pub fn is_empty(&self) -> bool {
         self.cookies.is_empty()
     }
+
+    /// The stored cookies, in insertion order. Used by the session layer to
+    /// serialize the jar to disk.
+    pub fn cookies(&self) -> &[Cookie] {
+        &self.cookies
+    }
+
+    /// Insert a fully-specified cookie (as reconstructed from a session
+    /// file), replacing any existing cookie with the same name, domain, and
+    /// path. Used when loading a session into the jar.
+    pub fn insert(&mut self, cookie: Cookie) {
+        self.cookies.retain(|c| {
+            !(c.name == cookie.name && c.domain == cookie.domain && c.path == cookie.path)
+        });
+        self.cookies.push(cookie);
+    }
 }
 
 impl Cookie {
     fn matches(&self, scheme: &str, host: &str, path: &str) -> bool {
         let host = host.to_ascii_lowercase();
-        let domain_ok = if self.domain_attribute {
+        let domain_ok = if self.domain.is_empty() {
+            // An unbound cookie (session file with empty or null domain)
+            // matches any host.
+            true
+        } else if self.domain_attribute {
             host == self.domain || host.ends_with(&format!(".{}", self.domain))
         } else {
             host == self.domain
@@ -101,7 +136,9 @@ fn parse_set_cookie(host: &str, header: &str) -> Option<Cookie> {
         value: value.trim().to_string(),
         domain: host.to_ascii_lowercase(),
         domain_attribute: false,
+        explicit_none_domain: false,
         path: "/".to_string(),
+        expires: None,
         secure: false,
     };
     if cookie.name.is_empty() {
@@ -171,6 +208,36 @@ mod tests {
         let mut jar = Jar::new();
         jar.store("localhost", "k=v; Secure");
         assert_eq!(jar.header_for("http", "localhost", "/"), Some("k=v".into()));
+    }
+
+    #[test]
+    fn parsed_cookie_has_no_expiry_and_bound_domain() {
+        // A cookie from a bare Set-Cookie line is a session cookie (no
+        // persistent expiry) bound to the setting host (not null).
+        let mut jar = Jar::new();
+        jar.store("a.example", "k=v");
+        let cookie = &jar.cookies()[0];
+        assert_eq!(cookie.expires, None);
+        assert!(!cookie.explicit_none_domain);
+        assert_eq!(cookie.domain, "a.example");
+    }
+
+    #[test]
+    fn unbound_cookie_matches_any_host() {
+        // A session-loaded cookie with an empty domain flows to every host.
+        let mut jar = Jar::new();
+        jar.insert(Cookie {
+            name: "k".to_string(),
+            value: "v".to_string(),
+            domain: String::new(),
+            domain_attribute: false,
+            explicit_none_domain: true,
+            path: "/".to_string(),
+            expires: None,
+            secure: false,
+        });
+        assert_eq!(jar.header_for("http", "a.example", "/"), Some("k=v".into()));
+        assert_eq!(jar.header_for("http", "b.example", "/"), Some("k=v".into()));
     }
 
     #[test]
