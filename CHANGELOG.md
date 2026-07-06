@@ -45,6 +45,18 @@ Initial release.
   and `--cert`/`--cert-key` for client certificates.
 - Declarative option table driving parsing, `--no-OPTION` negation, and help
   rendering, with argparse-style unambiguous long-option prefix matching.
+- `-x`/`--compress` to Deflate-compress the request body (`-x` only when it
+  shrinks the body; `-xx` unconditionally).
+- `-d`/`--download` with filename derivation (Content-Disposition, URL
+  basename, or a Content-Type extension) and `-c`/`--continue` resume.
+- Sessions: `--session` and `--session-read-only` persist headers, cookies, and
+  credentials to a JSON session file and replay them on later requests.
+- Configuration: `config.json` `default_options` are prepended to every
+  invocation; the config directory honors `FURL_CONFIG_DIR` and XDG.
+- Output formatting: `--pretty`, `--format-options`, and `--sorted`/`--unsorted`
+  reindent JSON and XML bodies and sort headers (color highlighting is planned).
+- `furl-manager cli export-args` emits a machine-readable description of the
+  request parser; `furl-manager` also reports plugin and update-check status.
 
 [Unreleased]: https://github.com/o1x3/furl/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/o1x3/furl/releases/tag/v0.1.0
