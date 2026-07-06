@@ -105,7 +105,10 @@ mod tests {
         assert_eq!(norm("example.org"), "http://example.org");
         assert_eq!(norm("example.org/path?q=1"), "http://example.org/path?q=1");
         assert_eq!(normalize_url("example.org", "https"), "https://example.org");
-        assert_eq!(normalize_url("example.org", "custom"), "custom://example.org");
+        assert_eq!(
+            normalize_url("example.org", "custom"),
+            "custom://example.org"
+        );
     }
 
     #[test]

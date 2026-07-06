@@ -4,6 +4,7 @@
 //! binaries. The binaries are thin wrappers; all behavior lives here.
 
 pub mod cli;
+pub mod encoding;
 pub mod json;
 pub mod status;
 

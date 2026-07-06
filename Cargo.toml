@@ -28,6 +28,8 @@ name = "furl-manager"
 path = "src/bin/furl-manager.rs"
 
 [dependencies]
+# WHATWG-registry text encodings: response decoding and label validation.
+encoding_rs = "0.8"
 
 [dev-dependencies]
 proptest = "1.11.0"
