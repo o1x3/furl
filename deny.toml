@@ -1,0 +1,48 @@
+# cargo-deny configuration for furl.
+# See https://embarkstudios.github.io/cargo-deny/ for the full schema.
+
+[graph]
+# Check the dependency graph for all target triples we ship binaries for.
+all-features = true
+
+[advisories]
+version = 2
+# Vulnerabilities always fail the check in schema v2 (the old `vulnerability`
+# field was removed), so security advisories are denied by default.
+# Yanked crate versions are a hard failure too.
+yanked = "deny"
+# Unmaintained advisories only fail when they affect a *direct* workspace
+# dependency; deep-transitive unmaintained crates surface as informational
+# output rather than blocking a release. ("all" would be the strict default.)
+unmaintained = "workspace"
+
+[licenses]
+version = 2
+# The crate itself is MIT OR Apache-2.0. This allow-list covers those plus
+# the permissive licenses commonly seen in the transitive dependency tree
+# (rustls, ring, encoding_rs, unicode data tables, etc.).
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "MPL-2.0",
+    "Zlib",
+]
+# Require a fairly high confidence before accepting a detected license.
+confidence-threshold = 0.8
+
+[bans]
+# Multiple versions of the same crate are common and usually harmless; warn
+# so we notice duplication creeping in without failing the build.
+multiple-versions = "warn"
+# Wildcard version requirements are a smell in a published crate.
+wildcards = "warn"
+
+[sources]
+# Only crates.io is expected. Flag anything pulled from elsewhere.
+unknown-registry = "deny"
+unknown-git = "deny"

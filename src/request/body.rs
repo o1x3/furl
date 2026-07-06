@@ -121,3 +121,12 @@ pub fn guess_mime(path: &std::path::Path) -> Option<String> {
         .first()
         .map(|m| m.essence_str().to_string())
 }
+
+/// Compress bytes in zlib format (RFC 1950) — the correct wire meaning of
+/// HTTP `Content-Encoding: deflate`.
+pub fn zlib_compress(bytes: &[u8]) -> Vec<u8> {
+    use std::io::Write;
+    let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+    encoder.write_all(bytes).expect("in-memory zlib write");
+    encoder.finish().expect("in-memory zlib finish")
+}

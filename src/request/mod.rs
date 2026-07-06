@@ -221,6 +221,22 @@ pub fn build(context: &BuildContext<'_>) -> Result<PreparedRequest, BuildError> 
     if let Some(mime) = &file_content_type {
         app_headers.set("Content-Type", mime);
     }
+    // --compress: replace the body with its zlib-compressed form.
+    // Once (`-x`) keeps the original unless compression strictly shrinks
+    // it; twice (`-xx`) forces it. Empty bodies are left alone.
+    let mut built_body = built_body;
+    if args.compress > 0 {
+        if let Some(body) = &mut built_body {
+            if !body.bytes.is_empty() {
+                let compressed = body::zlib_compress(&body.bytes);
+                if args.compress >= 2 || compressed.len() < body.bytes.len() {
+                    body.bytes = compressed;
+                    app_headers.set("Content-Encoding", "deflate");
+                }
+            }
+        }
+    }
+
     app_headers.apply_cli_items(&items.headers);
 
     // The multipart type is decided after the CLI overlay. Only a

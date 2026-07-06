@@ -402,6 +402,33 @@ fn top_level_array_body() {
 }
 
 #[test]
+fn compress_twice_forces_deflate() {
+    let request = prepared(&["POST", "example.org", "-xx", "data=x"]);
+    assert_eq!(request.headers.get("Content-Encoding"), Some("deflate"));
+    let body = &request.body.as_ref().unwrap().bytes;
+    assert_eq!(&body[..2], &[0x78, 0x9c]);
+    assert_eq!(
+        request.headers.get("Content-Length"),
+        Some(body.len().to_string().as_str())
+    );
+}
+
+#[test]
+fn compress_once_skips_when_not_smaller() {
+    let request = prepared(&["POST", "example.org", "-x", "a=b"]);
+    assert_eq!(request.headers.get("Content-Encoding"), None);
+    assert_eq!(request.body.as_ref().unwrap().bytes, br#"{"a": "b"}"#);
+}
+
+#[test]
+fn compress_once_applies_when_smaller() {
+    let big = format!("data={}", "a".repeat(500));
+    let request = prepared(&["POST", "example.org", "-x", big.as_str()]);
+    assert_eq!(request.headers.get("Content-Encoding"), Some("deflate"));
+    assert!(request.body.as_ref().unwrap().bytes.len() < 500);
+}
+
+#[test]
 fn unicode_json_body_is_ascii_escaped_on_the_wire() {
     let request = prepared(&["POST", "example.org", "name=é"]);
     assert_eq!(
