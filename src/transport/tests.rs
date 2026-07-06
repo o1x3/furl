@@ -62,6 +62,7 @@ fn roundtrip(
         default_scheme: "http",
         session_headers: &[],
         session_authorization: None,
+        netrc_authorization: None,
         version: "0.1.0",
     })
     .expect("build");
@@ -195,6 +196,7 @@ fn max_headers_is_enforced() {
         default_scheme: "http",
         session_headers: &[],
         session_authorization: None,
+        netrc_authorization: None,
         version: "0.1.0",
     })
     .unwrap();

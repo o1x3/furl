@@ -247,6 +247,19 @@ fn execute(
         .and_then(|s| s.session.auth())
         .and_then(session_auth_header);
 
+    // -- netrc fallback ---------------------------------------------------------
+    // With no `-a` and netrc not suppressed, credentials come from the
+    // user's netrc file for the request host. A URL-userinfo request
+    // already resolves auth inside build(), which takes priority.
+    let netrc_authorization = if args.auth.is_none() && !args.ignore_netrc {
+        let host = crate::request::host_for_prompt(&args.url, scheme);
+        let host = crate::session::port_stripped_host(&host).to_string();
+        crate::netrc::lookup(&host)
+            .map(|auth| crate::request::basic_authorization(&auth.login, &auth.password))
+    } else {
+        None
+    };
+
     // -- Build ------------------------------------------------------------------
     let request = build(&BuildContext {
         args,
@@ -256,6 +269,7 @@ fn execute(
         version: VERSION,
         session_headers: &session_headers,
         session_authorization,
+        netrc_authorization,
     })
     .map_err(|error| match error {
         BuildError::Usage(message) => Failure::Usage(message),

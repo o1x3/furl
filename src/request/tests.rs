@@ -25,6 +25,7 @@ fn prepared_with_stdin(
         default_scheme: "http",
         session_headers: &[],
         session_authorization: None,
+        netrc_authorization: None,
         version: "0.1.0",
     })
 }

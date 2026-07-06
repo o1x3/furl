@@ -91,6 +91,9 @@ pub struct BuildContext<'a> {
     /// Session-stored authorization header, applied when the invocation
     /// carries no `-a`/URL credentials of its own.
     pub session_authorization: Option<String>,
+    /// A `.netrc` basic-auth header, applied when the invocation carries
+    /// no `-a`/URL credentials (higher priority than the session).
+    pub netrc_authorization: Option<String>,
 }
 
 pub fn build(context: &BuildContext<'_>) -> Result<PreparedRequest, BuildError> {
@@ -290,6 +293,7 @@ pub fn build(context: &BuildContext<'_>) -> Result<PreparedRequest, BuildError> 
     // `Authorization:` header; a raw header stands only when no auth was
     // resolved.
     let authorization = resolve_authorization(args, userinfo.as_ref())?
+        .or_else(|| context.netrc_authorization.clone())
         .or_else(|| context.session_authorization.clone());
     if authorization.is_some() {
         // The computed header replaces any raw Authorization from the CLI.
