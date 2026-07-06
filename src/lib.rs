@@ -5,9 +5,13 @@
 
 pub mod cli;
 pub mod encoding;
+pub mod errors;
+pub mod help;
 pub mod json;
+pub mod output;
 pub mod paths;
 pub mod request;
+mod run;
 pub mod status;
 
 /// The furl version, taken from the crate metadata.
@@ -27,14 +31,7 @@ pub enum Program {
 
 /// Entry point for the `furl` and `furls` binaries.
 pub fn run(program: Program) -> i32 {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.iter().any(|a| a == "--version") {
-        println!("{VERSION}");
-        return 0;
-    }
-    let _ = program;
-    eprintln!("furl: not yet implemented");
-    1
+    run::run(program)
 }
 
 /// Entry point for the `furl-manager` binary.

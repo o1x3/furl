@@ -21,10 +21,10 @@ pub enum Outcome {
 
 /// A usage error: message plus the option to blame in the usage line
 /// (when the error came from a specific known option).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct UsageError {
     pub message: String,
-    pub option: Option<String>,
+    pub option: Option<&'static OptionSpec>,
 }
 
 impl UsageError {
@@ -35,10 +35,10 @@ impl UsageError {
         }
     }
 
-    fn for_option(spec: &OptionSpec, detail: &str) -> UsageError {
+    fn for_option(spec: &'static OptionSpec, detail: &str) -> UsageError {
         UsageError {
             message: format!("argument {}: {detail}", spec.display_name()),
-            option: Some(spec.display_name()),
+            option: Some(spec),
         }
     }
 }
@@ -238,7 +238,7 @@ impl Parser<'_> {
 
     /// The next argv token serves as the value unless it looks like an
     /// option itself.
-    fn take_value(&mut self, spec: &OptionSpec) -> Result<String, UsageError> {
+    fn take_value(&mut self, spec: &'static OptionSpec) -> Result<String, UsageError> {
         match self.argv.get(self.at) {
             Some(next) if !is_option_token(next) && next != "--" => {
                 self.at += 1;
@@ -250,7 +250,7 @@ impl Parser<'_> {
 
     /// `--session` and `--session-read-only` are mutually exclusive; the
     /// clash is reported the moment the second one appears.
-    fn check_session_group(&mut self, spec: &OptionSpec) -> Result<(), UsageError> {
+    fn check_session_group(&mut self, spec: &'static OptionSpec) -> Result<(), UsageError> {
         let name = match spec.id {
             OptId::Session => "--session",
             OptId::SessionReadOnly => "--session-read-only",
@@ -313,7 +313,7 @@ impl Parser<'_> {
                 for item in positionals {
                     ParsedArgs::validate_item_token(&item).map_err(|detail| UsageError {
                         message: format!("argument REQUEST_ITEM: {detail}"),
-                        option: Some("REQUEST_ITEM".to_string()),
+                        option: None,
                     })?;
                     self.args.request_items.push(item);
                 }

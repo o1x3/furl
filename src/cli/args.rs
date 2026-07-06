@@ -301,6 +301,14 @@ impl ParsedArgs {
     }
 }
 
+/// Does this raw item token use a data separator (`=`, `:=`, `@`, `=@`,
+/// `:=@`)? Method guessing counts these.
+pub fn token_has_data_separator(token: &str) -> bool {
+    split_item(token, ALL_SEPARATORS)
+        .map(|split| split.separator.is_data())
+        .unwrap_or(false)
+}
+
 fn validate_session_name(value: &str) -> Result<(), String> {
     let has_path_separator =
         value.contains(std::path::MAIN_SEPARATOR) || (cfg!(windows) && value.contains('/'));

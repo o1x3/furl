@@ -359,6 +359,13 @@ fn resolve_authorization(
     Ok(None)
 }
 
+/// The host shown in the password prompt, from the (possibly shorthand)
+/// URL argument.
+pub fn host_for_prompt(url_argument: &str, default_scheme: &str) -> String {
+    let normalized = normalize_url(url_argument, default_scheme);
+    netloc_of(&normalized)
+}
+
 /// Split `user:password` on the first unescaped colon; no colon means
 /// the password must be prompted for.
 pub fn split_credentials(auth: &str) -> (String, Option<String>) {
