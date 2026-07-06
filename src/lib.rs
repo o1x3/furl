@@ -3,6 +3,8 @@
 //! This library crate backs the `furl`, `furls`, and `furl-manager`
 //! binaries. The binaries are thin wrappers; all behavior lives here.
 
+pub mod cli;
+
 /// The furl version, taken from the crate metadata.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
