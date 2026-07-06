@@ -73,6 +73,7 @@ dependencies = [
  "encoding_rs",
  "proptest",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]
