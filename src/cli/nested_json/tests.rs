@@ -2,12 +2,52 @@ use serde_json::{Value, json};
 
 use super::{NestedJson, NestedJsonError};
 
+/// Tests express values with `serde_json::json!` for readability and
+/// convert at the boundary.
+fn to_furl(value: &Value) -> crate::json::Value {
+    match value {
+        Value::Null => crate::json::Value::Null,
+        Value::Bool(b) => crate::json::Value::Bool(*b),
+        Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                crate::json::Value::from(i)
+            } else {
+                crate::json::Value::from(n.as_f64().expect("test numbers fit f64"))
+            }
+        }
+        Value::String(s) => crate::json::Value::from(s.clone()),
+        Value::Array(items) => crate::json::Value::Array(items.iter().map(to_furl).collect()),
+        Value::Object(map) => {
+            crate::json::Value::Object(map.iter().map(|(k, v)| (k.clone(), to_furl(v))).collect())
+        }
+    }
+}
+
+fn from_furl(value: &crate::json::Value) -> Value {
+    match value {
+        crate::json::Value::Null => Value::Null,
+        crate::json::Value::Bool(b) => Value::Bool(*b),
+        crate::json::Value::Number(n) => match n.as_i64() {
+            Some(i) => json!(i),
+            None => json!(n.as_f64()),
+        },
+        crate::json::Value::String(s) => Value::String(s.clone()),
+        crate::json::Value::Array(items) => Value::Array(items.iter().map(from_furl).collect()),
+        crate::json::Value::Object(pairs) => Value::Object(
+            pairs
+                .iter()
+                .map(|(k, v)| (k.clone(), from_furl(v)))
+                .collect(),
+        ),
+    }
+}
+
 fn build(pairs: &[(&str, Value)]) -> Result<Value, NestedJsonError> {
     let mut nested = NestedJson::new();
     for (key, value) in pairs {
-        nested.assign(key, value.clone())?;
+        nested.assign(key, to_furl(value))?;
     }
-    Ok(nested.finish())
+    Ok(from_furl(&nested.finish()))
 }
 
 #[track_caller]

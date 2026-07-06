@@ -17,7 +17,7 @@ mod proptests;
 #[cfg(test)]
 mod tests;
 
-use serde_json::Value;
+use crate::json::Value;
 
 /// A half-open span of character positions within a data-item key.
 ///
@@ -106,7 +106,7 @@ impl NestedJson {
     /// (`[]:=1`-style keys).
     pub fn finish(self) -> Value {
         match self.context {
-            None => Value::Object(serde_json::Map::new()),
+            None => Value::Object(Vec::new()),
             Some(value) => value,
         }
     }

@@ -28,12 +28,12 @@ name = "furl-manager"
 path = "src/bin/furl-manager.rs"
 
 [dependencies]
-# JSON with insertion-order preservation, matching the data-item grammar's
-# "later assignments extend earlier structures in order" semantics.
-serde_json = { version = "1", features = ["preserve_order"] }
 
 [dev-dependencies]
 proptest = "1.11.0"
+# Convenience only (json! literals in tests, harness plumbing); the
+# library itself uses its own JSON implementation.
+serde_json = "1"
 
 [profile.release]
 lto = "thin"

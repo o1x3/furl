@@ -299,8 +299,10 @@ fn special_floats_serialize_like_the_reference() {
 }
 
 #[test]
+#[allow(clippy::excessive_precision, clippy::approx_constant)]
 fn float_rendering_matches_reference_repr() {
-    // Ground truth generated with the reference implementation.
+    // Ground truth generated with the reference implementation; literals
+    // are verbatim vectors, precision quirks included.
     let cases: &[(f64, &str)] = &[
         (1.5, "1.5"),
         (0.1, "0.1"),
@@ -337,13 +339,11 @@ fn float_rendering_matches_reference_repr() {
 
 #[test]
 fn roundtrip_preserves_number_identity() {
-    for text in ["[1, 1.0, 1e2, 0.5, -7, 123456789012345678901234567890]"] {
-        let value = parse(text).unwrap();
-        assert_eq!(
-            compact(&value),
-            "[1, 1.0, 100.0, 0.5, -7, 123456789012345678901234567890]"
-        );
-    }
+    let value = parse("[1, 1.0, 1e2, 0.5, -7, 123456789012345678901234567890]").unwrap();
+    assert_eq!(
+        compact(&value),
+        "[1, 1.0, 100.0, 0.5, -7, 123456789012345678901234567890]"
+    );
 }
 
 #[test]

@@ -6,9 +6,9 @@
 //! the shape of rendered errors.
 
 use proptest::prelude::*;
-use serde_json::Value;
 
 use super::NestedJson;
+use crate::json::Value;
 
 /// Highest index the valid-path generators produce; keeps the null
 /// padding of sparse assignments cheap.
@@ -107,7 +107,7 @@ fn lookup<'a>(body: &'a Value, path: &[PathSegment]) -> Option<&'a Value> {
     for segment in path {
         cursor = match segment {
             PathSegment::Key(text) => cursor.get(text.as_str())?,
-            PathSegment::Index(n) => cursor.get(*n)?,
+            PathSegment::Index(n) => cursor.get_index(*n)?,
             PathSegment::Append => cursor.as_array()?.last()?,
         };
     }

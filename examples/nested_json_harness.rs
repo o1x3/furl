@@ -7,6 +7,7 @@
 use std::io::BufRead;
 
 use furl::cli::nested_json::NestedJson;
+use furl::json::{DumpOptions, Value, dumps, parse};
 
 fn main() {
     let stdin = std::io::stdin();
@@ -15,20 +16,29 @@ fn main() {
         if line.trim().is_empty() {
             continue;
         }
-        let pairs: Vec<(String, serde_json::Value)> =
-            serde_json::from_str(&line).expect("input line must be a JSON array of pairs");
+        let Value::Array(pairs) = parse(&line).expect("input line must be a JSON array") else {
+            panic!("input line must be a JSON array of pairs");
+        };
         let mut nested = NestedJson::new();
         let mut error = None;
-        for (key, value) in pairs {
+        for pair in pairs {
+            let Value::Array(mut pair) = pair else {
+                panic!("each pair must be a two-element array");
+            };
+            assert_eq!(pair.len(), 2, "each pair must be a two-element array");
+            let value = pair.pop().expect("value");
+            let Value::String(key) = pair.pop().expect("key") else {
+                panic!("pair keys must be strings");
+            };
             if let Err(e) = nested.assign(&key, value) {
                 error = Some(e);
                 break;
             }
         }
         let output = match error {
-            Some(e) => serde_json::json!({ "error": e.to_string() }),
-            None => serde_json::json!({ "ok": nested.finish() }),
+            Some(e) => Value::Object(vec![("error".to_string(), Value::from(e.to_string()))]),
+            None => Value::Object(vec![("ok".to_string(), nested.finish())]),
         };
-        println!("{output}");
+        println!("{}", dumps(&output, &DumpOptions::default()));
     }
 }

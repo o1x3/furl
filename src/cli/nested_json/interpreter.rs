@@ -1,6 +1,6 @@
 //! Folds parsed path assignments into the accumulated JSON context.
 
-use serde_json::{Map, Value};
+use crate::json::Value;
 
 use super::parser::{Segment, SegmentKind};
 use super::{ErrorKind, NestedJsonError};
@@ -29,16 +29,24 @@ pub(crate) fn assign(
                 if !cursor.is_object() {
                     return Err(type_error("key", segments, i, cursor, "object", key));
                 }
-                let Value::Object(object) = cursor else {
-                    unreachable!()
-                };
                 if is_last {
-                    object.insert(k.clone(), value.take().expect("value set only once"));
+                    cursor.object_set(k, value.take().expect("value set only once"));
                     return Ok(());
                 }
-                let slot = object
-                    .entry(k.clone())
-                    .or_insert_with(|| fresh_container(&segments[i + 1]));
+                let Value::Object(pairs) = cursor else {
+                    unreachable!()
+                };
+                // With duplicate keys (possible via raw-JSON values) the
+                // last occurrence is the one descended into, matching
+                // last-wins lookup semantics.
+                let at = match pairs.iter().rposition(|(name, _)| name == k) {
+                    Some(at) => at,
+                    None => {
+                        pairs.push((k.clone(), fresh_container(&segments[i + 1])));
+                        pairs.len() - 1
+                    }
+                };
+                let slot = &mut pairs[at].1;
                 // An explicit null marks "no structure here yet": descending
                 // through it replaces it with a fresh container.
                 if slot.is_null() {
@@ -117,7 +125,7 @@ pub(crate) fn assign(
 /// arrays for indexes and appends.
 fn fresh_container(segment: &Segment) -> Value {
     match segment.kind {
-        SegmentKind::Key(_) => Value::Object(Map::new()),
+        SegmentKind::Key(_) => Value::Object(Vec::new()),
         SegmentKind::Index { .. } | SegmentKind::Append => Value::Array(Vec::new()),
     }
 }
@@ -137,7 +145,7 @@ fn type_error(
              which has a type of '{actual}' but this operation requires \
              a type of '{required}'.",
             prefix = render_prefix(&segments[..offending]),
-            actual = json_type_name(actual),
+            actual = actual.type_name(),
         ),
         key: key.to_string(),
         span: segments[offending].span,
@@ -164,15 +172,4 @@ fn render_prefix(segments: &[Segment]) -> String {
         }
     }
     out
-}
-
-fn json_type_name(value: &Value) -> &'static str {
-    match value {
-        Value::Object(_) => "object",
-        Value::Array(_) => "array",
-        Value::String(_) => "string",
-        Value::Number(_) => "number",
-        Value::Bool(_) => "boolean",
-        Value::Null => "null",
-    }
 }

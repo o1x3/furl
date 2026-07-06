@@ -50,6 +50,38 @@ impl Value {
         }
     }
 
+    pub fn get_index(&self, index: usize) -> Option<&Value> {
+        match self {
+            Value::Array(items) => items.get(index),
+            _ => None,
+        }
+    }
+
+    pub fn as_array(&self) -> Option<&Vec<Value>> {
+        match self {
+            Value::Array(items) => Some(items),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(&self) -> Option<&str> {
+        match self {
+            Value::String(s) => Some(s),
+            _ => None,
+        }
+    }
+
+    /// Set a key: with duplicate keys the last occurrence is replaced in
+    /// place; a missing key is appended.
+    pub fn object_set(&mut self, key: &str, value: Value) {
+        if let Value::Object(pairs) = self {
+            match pairs.iter().rposition(|(name, _)| name == key) {
+                Some(i) => pairs[i].1 = value,
+                None => pairs.push((key.to_string(), value)),
+            }
+        }
+    }
+
     /// The JSON type name, as used in user-facing messages.
     pub fn type_name(&self) -> &'static str {
         match self {
@@ -106,6 +138,13 @@ impl Number {
             NumberRepr::Int(text) => text.parse().unwrap_or(f64::NAN),
             NumberRepr::Float(f) => *f,
         }
+    }
+}
+
+impl std::fmt::Display for Value {
+    /// Compact serialization with the default options.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&dumps(self, &DumpOptions::default()))
     }
 }
 
