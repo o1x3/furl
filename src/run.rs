@@ -274,12 +274,21 @@ fn execute(
     // is a usage error even in offline mode.
     let stdout_tty = std::io::stdout().is_terminal();
     let format_tty = stdout_tty && args.output.is_none() && !args.download;
+    let mode = crate::output::format::PrettyMode::resolve(args.pretty.as_deref(), format_tty);
+    let colors_group = matches!(
+        mode,
+        crate::output::format::PrettyMode::All | crate::output::format::PrettyMode::Colors
+    );
+    let color_depth = crate::output::color::detect_color_depth();
+    let style = (colors_group && crate::output::color::colors_active(color_depth))
+        .then(|| crate::output::color::resolve_style(&args.style, color_depth));
     let format = FormatContext {
-        mode: crate::output::format::PrettyMode::resolve(args.pretty.as_deref(), format_tty),
+        mode,
         options: crate::output::format::FormatOptions::from_occurrences(&args.format_options)
             .map_err(Failure::Usage)?,
         explicit_json: args.request_type == Some(crate::cli::args::RequestType::Json),
         response_mime: args.response_mime.clone(),
+        style,
     };
 
     // -- Offline execution ---------------------------------------------------------
@@ -296,7 +305,7 @@ fn execute(
             ))
             .trim_end_matches("\r\n\r\n")
             .to_string();
-            rendered.extend_from_slice(format.head(&head).as_bytes());
+            rendered.extend_from_slice(format.head(&head, HeadKind::Request).as_bytes());
             rendered.extend_from_slice(b"\r\n\r\n");
         }
         if parts.body {
@@ -411,8 +420,10 @@ impl Emitter {
             }
         }
 
-        if let Some(elapsed) = &message.meta {
-            self.write(format!("\n\nElapsed time: {elapsed}\n\n").as_bytes());
+        if let Some(meta) = &message.meta {
+            // The meta text already carries its "Elapsed time: …" label
+            // (and any coloring); the writer only supplies the separators.
+            self.write(format!("\n\n{meta}\n\n").as_bytes());
         } else if self.tty && printed_bytes {
             // On a terminal, a body-printing message ends with a blank
             // line (unless meta already supplied its trailing separator).
@@ -578,42 +589,91 @@ fn rebuild_for_redirect(
     Ok(request)
 }
 
+/// Which message a head belongs to (colored differently for requests
+/// versus responses).
+#[derive(Clone, Copy)]
+enum HeadKind {
+    Request,
+    Response,
+}
+
 /// The resolved output-formatting configuration for one run.
 struct FormatContext {
     mode: crate::output::format::PrettyMode,
     options: crate::output::format::FormatOptions,
     explicit_json: bool,
     response_mime: Option<String>,
+    /// The resolved color style (from `--style` + terminal depth). `None`
+    /// when the colors group is inactive or the terminal has no color.
+    style: Option<crate::output::color::Style>,
 }
 
 impl FormatContext {
-    /// Sort a rendered head block's header lines when the format group is
-    /// active (leaves it untouched otherwise).
-    fn head(&self, rendered: &str) -> String {
-        if crate::output::format::format_group_active(self.mode) {
+    fn format_active(&self) -> bool {
+        crate::output::format::format_group_active(self.mode)
+    }
+
+    fn colors_active(&self) -> bool {
+        self.style.is_some()
+            && matches!(
+                self.mode,
+                crate::output::format::PrettyMode::All | crate::output::format::PrettyMode::Colors
+            )
+    }
+
+    /// The format group sorts a head block's header lines; the colors
+    /// group then highlights it.
+    fn head(&self, rendered: &str, kind: HeadKind) -> String {
+        let formatted = if self.format_active() {
             crate::output::format::sort_header_lines(rendered, &self.options)
         } else {
             rendered.to_string()
+        };
+        match &self.style {
+            Some(style) if self.colors_active() => match kind {
+                HeadKind::Request => crate::output::color::colorize_request_head(&formatted, style),
+                HeadKind::Response => {
+                    crate::output::color::colorize_response_head(&formatted, style)
+                }
+            },
+            _ => formatted,
         }
     }
 
-    /// Reformat a body per the active format group, decoding lossily for
-    /// the formatter and re-encoding to bytes.
+    /// Reformat and then highlight a body, decoding lossily for the
+    /// processors and re-encoding to bytes.
     fn body(&self, bytes: Vec<u8>, content_type: Option<&str>) -> Vec<u8> {
-        if !crate::output::format::format_group_active(self.mode) {
+        if !self.format_active() && !self.colors_active() {
             return bytes;
         }
         let text = String::from_utf8_lossy(&bytes);
         let mime =
             crate::output::format::effective_mime(content_type, self.response_mime.as_deref());
-        crate::output::format::format_body(
-            &text,
-            mime.as_deref(),
-            self.explicit_json,
-            &self.options,
-            self.mode,
-        )
-        .into_bytes()
+        let formatted = if self.format_active() {
+            crate::output::format::format_body(
+                &text,
+                mime.as_deref(),
+                self.explicit_json,
+                &self.options,
+                self.mode,
+            )
+        } else {
+            text.to_string()
+        };
+        match &self.style {
+            Some(style) if self.colors_active() => {
+                crate::output::color::colorize_body(&formatted, mime.as_deref(), style).into_bytes()
+            }
+            _ => formatted.into_bytes(),
+        }
+    }
+
+    /// Highlight the meta section text when the colors group is active.
+    fn meta(&self, text: &str) -> String {
+        match &self.style {
+            Some(style) if self.colors_active() => crate::output::color::colorize_meta(text, style),
+            _ => text.to_string(),
+        }
     }
 }
 
@@ -752,6 +812,7 @@ fn execute_online(
                         },
                     ))
                     .trim_end_matches("\r\n\r\n"),
+                    HeadKind::Request,
                 )
             }),
             body: letters.contains('B').then(|| {
@@ -772,14 +833,24 @@ fn execute_online(
             emitter.message(Message {
                 head: letters
                     .contains('h')
-                    .then(|| format.head(&render_response_head(&response))),
+                    .then(|| format.head(&render_response_head(&response), HeadKind::Response)),
                 body: letters.contains('b').then(|| {
-                    format.body(
+                    let body = format.body(
                         transport::decoded_body(&response),
                         response_content_type.as_deref(),
-                    )
+                    );
+                    // A HEAD response has no body, but the reference still
+                    // runs its empty body through the colorizer, which
+                    // emits a lone newline.
+                    if body.is_empty() && current.method == "HEAD" && format.colors_active() {
+                        b"\n".to_vec()
+                    } else {
+                        body
+                    }
                 }),
-                meta: letters.contains('m').then(|| format_elapsed(elapsed)),
+                meta: letters
+                    .contains('m')
+                    .then(|| format.meta(&format!("Elapsed time: {}", format_elapsed(elapsed)))),
             });
         }
 

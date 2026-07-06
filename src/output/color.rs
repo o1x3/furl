@@ -403,13 +403,41 @@ impl PieColor {
 // The pie brand palette (spec §3.3), shades 500/600/700 only, reproduced as
 // data. GREY is omitted here because the terminal override collapses it to a
 // single ANSI-name color; see `pie_style`.
-const GREEN: PieColor = PieColor { s500: "73DC8C", s600: "63C27A", s700: "52AB66" };
-const YELLOW: PieColor = PieColor { s500: "DBDE52", s600: "CCCC3D", s700: "BABA29" };
-const ORANGE: PieColor = PieColor { s500: "FFA24E", s600: "F2913D", s700: "E3822B" };
-const RED: PieColor = PieColor { s500: "FF665B", s600: "E34F45", s700: "C7382E" };
-const BLUE: PieColor = PieColor { s500: "4B78E6", s600: "426BD1", s700: "3B5EBA" };
-const PINK: PieColor = PieColor { s500: "FA9BFA", s600: "DE85DE", s700: "C26EC2" };
-const AQUA: PieColor = PieColor { s500: "8CB4CD", s600: "7A9EB5", s700: "698799" };
+const GREEN: PieColor = PieColor {
+    s500: "73DC8C",
+    s600: "63C27A",
+    s700: "52AB66",
+};
+const YELLOW: PieColor = PieColor {
+    s500: "DBDE52",
+    s600: "CCCC3D",
+    s700: "BABA29",
+};
+const ORANGE: PieColor = PieColor {
+    s500: "FFA24E",
+    s600: "F2913D",
+    s700: "E3822B",
+};
+const RED: PieColor = PieColor {
+    s500: "FF665B",
+    s600: "E34F45",
+    s700: "C7382E",
+};
+const BLUE: PieColor = PieColor {
+    s500: "4B78E6",
+    s600: "426BD1",
+    s700: "3B5EBA",
+};
+const PINK: PieColor = PieColor {
+    s500: "FA9BFA",
+    s600: "DE85DE",
+    s700: "C26EC2",
+};
+const AQUA: PieColor = PieColor {
+    s500: "8CB4CD",
+    s600: "7A9EB5",
+    s700: "698799",
+};
 
 /// Build the pie 256-color style for one shade.
 ///
@@ -940,8 +968,20 @@ pub fn colorize_body(text: &str, mime: Option<&str>, style: &Style) -> String {
     }
 
     let mut out = String::with_capacity(text.len() * 2);
-    for token in json_tokens(text) {
-        let color = match token.kind {
+    // Adjacent tokens of the same kind are emitted as one colored run
+    // (pygments coalesces same-type tokens — e.g. `},` is one escape span,
+    // not two). Accumulate a same-kind run's text, then emit it once.
+    let tokens = json_tokens(text);
+    let mut i = 0;
+    while i < tokens.len() {
+        let kind = tokens[i].kind;
+        let mut run = String::from(tokens[i].text);
+        let mut j = i + 1;
+        while j < tokens.len() && tokens[j].kind == kind {
+            run.push_str(tokens[j].text);
+            j += 1;
+        }
+        let color = match kind {
             JsonTok::Key => &style.json_key,
             JsonTok::String => &style.json_string,
             JsonTok::Number => &style.json_number,
@@ -950,7 +990,8 @@ pub fn colorize_body(text: &str, mime: Option<&str>, style: &Style) -> String {
             JsonTok::Whitespace => &style.json_ws,
             JsonTok::Error => &style.json_error,
         };
-        style.emit(&mut out, color, token.text);
+        style.emit(&mut out, color, &run);
+        i = j;
     }
 
     // The highlighter guarantees a trailing newline on colored bodies (§5.4).
@@ -1168,9 +1209,7 @@ fn scan_number(bytes: &[u8], start: usize) -> usize {
     if i < bytes.len() && bytes[i] == b'-' {
         i += 1;
     }
-    while i < bytes.len()
-        && matches!(bytes[i], b'0'..=b'9' | b'.' | b'e' | b'E' | b'+' | b'-')
-    {
+    while i < bytes.len() && matches!(bytes[i], b'0'..=b'9' | b'.' | b'e' | b'E' | b'+' | b'-') {
         i += 1;
     }
     i.max(start + 1)
@@ -1301,7 +1340,8 @@ mod tests {
     #[test]
     fn auto_request_head_byte_exact() {
         let style = resolve_style("auto", ColorDepth::Ansi8);
-        let head = "GET /get HTTP/1.1\r\nAccept-Encoding: gzip, deflate, zstd\r\nHost: 127.0.0.1:8099";
+        let head =
+            "GET /get HTTP/1.1\r\nAccept-Encoding: gzip, deflate, zstd\r\nHost: 127.0.0.1:8099";
         let out = colorize_request_head(head, &style);
         let expected = concat!(
             "\x1b[32mGET\x1b[39;49;00m \x1b[04m\x1b[36m/get\x1b[39;49;00m ",
@@ -1466,7 +1506,10 @@ mod tests {
             "application/hal+json",
         ] {
             let out = colorize_body(r#"{"a":1}"#, Some(mime), &style);
-            assert!(out.contains("\x1b["), "mime {mime} should colorize: {out:?}");
+            assert!(
+                out.contains("\x1b["),
+                "mime {mime} should colorize: {out:?}"
+            );
         }
     }
 
@@ -1574,7 +1617,10 @@ mod tests {
         assert!(slow.contains("\x1b[38;5;209;01m2.0\x1b[39;00m"), "{slow:?}");
         // very slow (>2.5) → red bold.
         let vslow = colorize_meta("Elapsed time: 3.0s", &style);
-        assert!(vslow.contains("\x1b[38;5;167;01m3.0\x1b[39;00m"), "{vslow:?}");
+        assert!(
+            vslow.contains("\x1b[38;5;167;01m3.0\x1b[39;00m"),
+            "{vslow:?}"
+        );
     }
 
     // --- Style resolution / downgrade (§3.2, §3.4) ---
@@ -1585,16 +1631,16 @@ mod tests {
             resolve_style("auto", ColorDepth::Ansi256),
             resolve_style("auto", ColorDepth::Ansi8)
         );
-        assert_eq!(resolve_style("auto", ColorDepth::Ansi256).family, Family::Ansi8);
+        assert_eq!(
+            resolve_style("auto", ColorDepth::Ansi256).family,
+            Family::Ansi8
+        );
     }
 
     #[test]
     fn resolve_pie_on_non_256_downgrades_to_generic() {
         // A pie style on an 8-color terminal is ignored → generic.
-        assert_eq!(
-            resolve_style("pie", ColorDepth::Ansi8),
-            generic_style()
-        );
+        assert_eq!(resolve_style("pie", ColorDepth::Ansi8), generic_style());
     }
 
     #[test]
@@ -1629,7 +1675,10 @@ mod tests {
         let style = resolve_style("auto", ColorDepth::Ansi8);
         let head = "HTTP/1.1 200 OK\r\nA: b";
         let out = colorize_response_head(head, &style);
-        assert!(!out.contains('\r'), "colorized head must use LF joins: {out:?}");
+        assert!(
+            !out.contains('\r'),
+            "colorized head must use LF joins: {out:?}"
+        );
         assert!(out.contains('\n'));
     }
 

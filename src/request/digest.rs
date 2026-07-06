@@ -244,9 +244,7 @@ pub fn authorization(
     // value from the challenge (which may be `auth,auth-int`).
     let nc_hex = format!("{nc:08x}");
     let response = if uses_qop {
-        algorithm.hash(&format!(
-            "{ha1}:{nonce}:{nc_hex}:{cnonce}:auth:{ha2}"
-        ))
+        algorithm.hash(&format!("{ha1}:{nonce}:{nc_hex}:{cnonce}:auth:{ha2}"))
     } else {
         algorithm.hash(&format!("{ha1}:{nonce}:{ha2}"))
     };
@@ -266,9 +264,7 @@ pub fn authorization(
         header.push_str(&format!(", algorithm=\"{algorithm}\""));
     }
     if uses_qop {
-        header.push_str(&format!(
-            ", qop=\"auth\", nc={nc_hex}, cnonce=\"{cnonce}\""
-        ));
+        header.push_str(&format!(", qop=\"auth\", nc={nc_hex}, cnonce=\"{cnonce}\""));
     }
     Some(header)
 }
@@ -304,8 +300,7 @@ mod tests {
     #[test]
     fn quoted_value_may_contain_commas() {
         // A comma inside a quoted realm must not end the value.
-        let challenge =
-            parse_challenge("realm=\"quoted, comma\", nonce=b").expect("valid");
+        let challenge = parse_challenge("realm=\"quoted, comma\", nonce=b").expect("valid");
         assert_eq!(challenge.realm, "quoted, comma");
         assert_eq!(challenge.nonce, "b");
     }
@@ -459,7 +454,13 @@ mod tests {
             algorithm: Some("MD5".to_string()),
         };
         let header = authorization(
-            &challenge, "user", "pass", "GET", "/dir/index.html", 1, CNONCE,
+            &challenge,
+            "user",
+            "pass",
+            "GET",
+            "/dir/index.html",
+            1,
+            CNONCE,
         )
         .expect("qop=auth challenge yields a header");
         // opaque sits between response and algorithm.
@@ -478,7 +479,13 @@ mod tests {
             algorithm: Some("MD5".to_string()),
         };
         let header = authorization(
-            &challenge, "user", "pass", "GET", "/dir/index.html", 2, CNONCE,
+            &challenge,
+            "user",
+            "pass",
+            "GET",
+            "/dir/index.html",
+            2,
+            CNONCE,
         )
         .expect("qop=auth challenge yields a header");
         assert!(header.contains("nc=00000002"));
@@ -499,7 +506,13 @@ mod tests {
             algorithm: Some("MD5".to_string()),
         };
         let header = authorization(
-            &challenge, "user", "pass", "GET", "/dir/index.html", 1, CNONCE,
+            &challenge,
+            "user",
+            "pass",
+            "GET",
+            "/dir/index.html",
+            1,
+            CNONCE,
         );
         assert_eq!(header, None);
     }
@@ -516,7 +529,13 @@ mod tests {
             algorithm: Some("MD5".to_string()),
         };
         let header = authorization(
-            &challenge, "user", "pass", "GET", "/dir/index.html", 1, CNONCE,
+            &challenge,
+            "user",
+            "pass",
+            "GET",
+            "/dir/index.html",
+            1,
+            CNONCE,
         )
         .expect("auth present in qop list yields a header");
         assert!(header.contains(
