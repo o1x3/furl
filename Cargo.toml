@@ -1,0 +1,45 @@
+[package]
+name = "furl-http"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "furl: a human-friendly command-line HTTP client for the API era"
+readme = "README.md"
+homepage = "https://github.com/o1x3/furl"
+repository = "https://github.com/o1x3/furl"
+license = "MIT OR Apache-2.0"
+keywords = ["http", "cli", "client", "api", "curl"]
+categories = ["command-line-utilities", "web-programming::http-client"]
+
+[lib]
+name = "furl"
+path = "src/lib.rs"
+
+[[bin]]
+name = "furl"
+path = "src/bin/furl.rs"
+
+[[bin]]
+name = "furls"
+path = "src/bin/furls.rs"
+
+[[bin]]
+name = "furl-manager"
+path = "src/bin/furl-manager.rs"
+
+[dependencies]
+
+[dev-dependencies]
+
+[profile.release]
+lto = "thin"
+strip = "symbols"
+
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+dbg_macro = "warn"
+todo = "warn"
+print_stdout = "allow"
