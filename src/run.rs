@@ -18,11 +18,27 @@ use crate::{Program, VERSION};
 const PRINT_LETTERS: &str = "HBhbm";
 
 pub fn run(program: Program) -> i32 {
-    let argv: Vec<String> = std::env::args().skip(1).collect();
+    let cli_argv: Vec<String> = std::env::args().skip(1).collect();
     let program_name = match program {
         Program::Furl => "furl",
         Program::Furls => "furls",
     };
+
+    // Config `default_options` are prepended to the user's argv, so CLI
+    // tokens (coming later) win for last-wins options and accumulate for
+    // counts and appends. A malformed config file is a warning, not fatal.
+    let config_dir = crate::config::config_dir();
+    let (config, config_warning) = crate::config::load(&config_dir);
+    if let Some(warning) = config_warning {
+        let message = match warning {
+            crate::config::ConfigWarning::InvalidJson(m)
+            | crate::config::ConfigWarning::Unreadable(m) => m,
+        };
+        eprintln!("{program_name}: warning: {message}");
+    }
+    let mut argv = config.default_options;
+    argv.extend(cli_argv);
+
     // A literal --debug/--traceback token anywhere lets the parser's
     // internal status escape untranslated.
     let traceback_literal = argv.iter().any(|a| a == "--debug" || a == "--traceback");
