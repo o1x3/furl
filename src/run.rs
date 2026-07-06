@@ -781,6 +781,13 @@ fn execute_online(
                 .push(("Range".to_string(), format!("bytes={offset}-")));
         }
     }
+    // Digest auth answers a 401 challenge with one computed retry.
+    let digest_credentials = (args.auth_type.as_deref() == Some("digest"))
+        .then_some(args.auth.as_deref())
+        .flatten()
+        .map(split_credentials);
+    let mut digest_answered = false;
+
     let mut hops: i64 = 0;
     loop {
         let started_at = std::time::Instant::now();
@@ -794,6 +801,27 @@ fn execute_online(
                 jar.store(&host, &String::from_utf8_lossy(value));
             }
         }
+
+        // A 401 Digest challenge is answered once, replaying the same
+        // request with a computed Authorization header (skipped when the
+        // challenge offers no quality of protection we can satisfy).
+        let digest_authorization = (!digest_answered && response.status == 401)
+            .then_some(digest_credentials.as_ref())
+            .flatten()
+            .and_then(|(user, password)| {
+                let challenge = digest_challenge_header(&response)
+                    .and_then(|value| crate::request::digest::parse_challenge(&value))?;
+                crate::request::digest::authorization(
+                    &challenge,
+                    user,
+                    password.as_deref().unwrap_or_default(),
+                    &current.method,
+                    &current.request_target(),
+                    1,
+                    &digest_cnonce(),
+                )
+            });
+        let wants_digest = digest_authorization.is_some();
 
         let wants_redirect =
             follow && is_redirect_status(response.status) && response.header("Location").is_some();
@@ -809,7 +837,7 @@ fn execute_online(
                 status: ExitStatus::ErrorTooManyRedirects,
             });
         }
-        let is_final = !wants_redirect;
+        let is_final = !wants_redirect && !wants_digest;
 
         // The request message is always in the stream — intermediary
         // requests print (when H/B are selected) even without --all, and
@@ -892,9 +920,51 @@ fn execute_online(
             }
             return Ok(exit);
         }
+
+        // Answer a digest challenge by replaying the same request with the
+        // computed Authorization header (does not count as a redirect hop).
+        if let Some(authorization) = digest_authorization {
+            digest_answered = true;
+            current
+                .headers
+                .entries
+                .retain(|(name, _)| !name.eq_ignore_ascii_case("authorization"));
+            current
+                .headers
+                .entries
+                .push(("Authorization".to_string(), authorization));
+            continue;
+        }
+
         hops += 1;
         current = rebuild_for_redirect(current, &response, &jar)?;
     }
+}
+
+/// The `WWW-Authenticate: Digest …` challenge value (scheme prefix
+/// stripped), if the response carries one.
+fn digest_challenge_header(response: &RawResponse) -> Option<String> {
+    response
+        .headers
+        .iter()
+        .filter(|(name, _)| name.eq_ignore_ascii_case("www-authenticate"))
+        .filter_map(|(_, value)| {
+            let text = String::from_utf8_lossy(value);
+            let trimmed = text.trim_start();
+            trimmed
+                .strip_prefix("Digest ")
+                .or_else(|| trimmed.strip_prefix("digest "))
+                .map(str::to_string)
+        })
+        .next()
+}
+
+/// A client nonce for digest auth: a hex string unique enough per request.
+fn digest_cnonce() -> String {
+    use std::hash::{BuildHasher, Hasher};
+    let mut hasher = std::hash::RandomState::new().build_hasher();
+    hasher.write_u64(0);
+    format!("{:016x}", hasher.finish())
 }
 
 /// The byte offset to resume from: the size of an existing `--output`
