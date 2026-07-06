@@ -15,6 +15,7 @@ pub mod output;
 pub mod paths;
 pub mod request;
 mod run;
+pub mod session;
 pub mod status;
 pub mod transport;
 

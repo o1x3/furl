@@ -1,0 +1,160 @@
+.TH FURL 1 "2026" "furl" "furl Manual"
+.SH NAME
+furl, furls \- a human-friendly command-line HTTP client
+.SH SYNOPSIS
+.B furl
+[\fIOPTIONS\fR] [\fIMETHOD\fR] \fIURL\fR [\fIREQUEST_ITEM\fR ...]
+.br
+.B furls
+[\fIOPTIONS\fR] [\fIMETHOD\fR] \fIURL\fR [\fIREQUEST_ITEM\fR ...]
+.SH DESCRIPTION
+.B furl
+is a command-line HTTP client with an expressive, human-friendly syntax. It
+sends requests, prints readable responses, and can format and reformat JSON
+and XML bodies.
+.PP
+.B furls
+is identical to
+.B furl
+except that a URL without a scheme defaults to
+.B https://
+instead of
+.BR http:// .
+.SH POSITIONAL ARGUMENTS
+.TP
+.I METHOD
+The HTTP method (GET, POST, PUT, DELETE, ...). When omitted it is guessed:
+POST when the request carries data, otherwise GET.
+.TP
+.I URL
+The request URL. A missing scheme defaults to http:// (or https:// for
+.BR furls );
+a leading colon abbreviates localhost, e.g. \fB:3000/path\fR.
+.TP
+.I REQUEST_ITEM
+A key/value pair that shapes the request. The separator selects its role:
+.RS
+.IP "\fBName:value\fR" 14
+HTTP header
+.IP "\fBName;\fR"
+Header with an empty value
+.IP "\fBname==value\fR"
+URL query parameter
+.IP "\fBname=value\fR"
+Data field (string)
+.IP "\fBname:=value\fR"
+Raw JSON data field
+.IP "\fBname@file\fR"
+File upload form field
+.IP "\fBname=@file\fR, \fBname:=@file\fR, \fBName:@file\fR, \fBname==@file\fR"
+Value read from a file
+.RE
+.SH OPTIONS
+.TP
+.B \-j, \-\-json
+Serialize data items as a JSON object (the default).
+.TP
+.B \-f, \-\-form
+Serialize data items as form fields.
+.TP
+.B \-\-multipart
+Send a multipart/form-data request even without files.
+.TP
+.B \-\-raw \fITEXT\fR
+Pass raw request data without extra processing.
+.TP
+.B \-x, \-\-compress
+Compress the request body with Deflate; repeat to force.
+.TP
+.B \-\-pretty \fI{all,colors,format,none}\fR
+Control output processing. Defaults to
+.B all
+on a terminal and
+.B none
+when redirected.
+.TP
+.B \-\-format\-options \fIOPTS\fR
+Tune output formatting, e.g. \fBjson.indent:2\fR, \fBheaders.sort:false\fR.
+.TP
+.B \-p, \-\-print \fIWHAT\fR
+Select exchange parts: \fBH\fR request headers, \fBB\fR request body,
+\fBh\fR response headers, \fBb\fR response body, \fBm\fR response metadata.
+.TP
+.B \-v, \-\-verbose
+Print the whole exchange. Give twice to include response metadata.
+.TP
+.B \-o, \-\-output \fIFILE\fR
+Write output to FILE instead of the terminal.
+.TP
+.B \-d, \-\-download
+Save the response body to a file (wget-like).
+.TP
+.B \-c, \-\-continue
+Resume an interrupted download (requires \fB\-\-download\fR and \fB\-\-output\fR).
+.TP
+.B \-a, \-\-auth \fIUSER[:PASS]\fR
+Credentials for the selected auth type.
+.TP
+.B \-A, \-\-auth\-type \fI{basic,bearer,digest}\fR
+The authentication mechanism (default: basic).
+.TP
+.B \-F, \-\-follow
+Follow 30x redirects.
+.TP
+.B \-\-max\-redirects \fIN\fR
+The redirect limit used with \fB\-\-follow\fR (default 30).
+.TP
+.B \-\-timeout \fISECONDS\fR
+Give up when the connection is idle for this many seconds.
+.TP
+.B \-\-check\-status
+Reflect the HTTP status in the exit code (3/4/5 for 3xx/4xx/5xx).
+.TP
+.B \-\-verify \fIyes|no|PATH\fR
+Control TLS certificate verification (default: yes).
+.TP
+.B \-\-ssl \fI{tls1.2,tls1.3}\fR
+Force a specific TLS protocol version.
+.TP
+.B \-\-offline
+Build and print the request without sending it.
+.TP
+.B \-I, \-\-ignore\-stdin
+Never read piped standard input as the request body.
+.TP
+.B \-\-help
+Show the full help and exit.
+.TP
+.B \-\-version
+Show the program version and exit.
+.PP
+For every \fB\-\-OPTION\fR there is also a \fB\-\-no\-OPTION\fR that reverts it
+to its default value.
+.SH EXIT STATUS
+.TP
+.B 0
+Success.
+.TP
+.B 1
+A generic error, connection failure, or usage error.
+.TP
+.B 2
+The request timed out.
+.TP
+.B 3, 4, 5
+With \fB\-\-check\-status\fR: the final response was 3xx, 4xx, or 5xx.
+.TP
+.B 6
+Too many redirects.
+.SH ENVIRONMENT
+.TP
+.B FURL_CONFIG_DIR
+Override the configuration directory (default \fB~/.config/furl\fR).
+.SH FILES
+.TP
+.B ~/.config/furl/config.json
+Configuration, including \fBdefault_options\fR prepended to every invocation.
+.SH SEE ALSO
+.BR furl-manager (1)
+.SH AUTHOR
+Karthik Vinayan

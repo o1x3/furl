@@ -1,0 +1,61 @@
+#compdef furl furls
+# zsh completion for furl / furls
+# Install: place this file in a directory on your $fpath (e.g. ~/.zsh/completions)
+
+_furl() {
+    _arguments -s \
+        '(-j --json)'{-j,--json}'[Serialize data items as JSON (default)]' \
+        '(-f --form)'{-f,--form}'[Serialize data items as form fields]' \
+        '--multipart[Send a multipart/form-data request]' \
+        '--boundary[Custom multipart boundary]:boundary:' \
+        '--raw[Pass raw request data]:data:' \
+        '(-x --compress)'{-x,--compress}'[Compress the request body with Deflate]' \
+        '--pretty[Output processing]:mode:(all colors format none)' \
+        '(-s --style)'{-s,--style}'[Output color scheme]:style:' \
+        '--unsorted[Disable output sorting]' \
+        '--sorted[Enable output sorting]' \
+        '--response-charset[Override response encoding]:encoding:' \
+        '--response-mime[Override response MIME type]:mime:' \
+        '--format-options[Tune output formatting]:options:' \
+        '(-p --print)'{-p,--print}'[Parts of the exchange to print]:what:' \
+        '(-h --headers)'{-h,--headers}'[Print only response headers]' \
+        '(-m --meta)'{-m,--meta}'[Print only response metadata]' \
+        '(-b --body)'{-b,--body}'[Print only the response body]' \
+        '(-v --verbose)'{-v,--verbose}'[Print the whole exchange]' \
+        '--all[Show intermediary exchanges too]' \
+        '(-S --stream)'{-S,--stream}'[Stream the response body]' \
+        '(-o --output)'{-o,--output}'[Write output to FILE]:file:_files' \
+        '(-d --download)'{-d,--download}'[Save the response body to a file]' \
+        '(-c --continue)'{-c,--continue}'[Resume an interrupted download]' \
+        '(-q --quiet)'{-q,--quiet}'[Silence terminal output]' \
+        '--session[Reuse and update a named session]:session:' \
+        '--session-read-only[Use a session read-only]:session:' \
+        '(-a --auth)'{-a,--auth}'[Credentials USER[:PASS]]:auth:' \
+        '(-A --auth-type)'{-A,--auth-type}'[Auth mechanism]:type:(basic bearer digest)' \
+        '--ignore-netrc[Never read .netrc]' \
+        '--offline[Build and print the request without sending]' \
+        '--proxy[PROTOCOL:PROXY_URL]:proxy:' \
+        '(-F --follow)'{-F,--follow}'[Follow 30x redirects]' \
+        '--max-redirects[Redirect limit]:count:' \
+        '--max-headers[Max response header count]:count:' \
+        '--timeout[Socket idle timeout in seconds]:seconds:' \
+        '--check-status[Reflect HTTP status in the exit code]' \
+        '--path-as-is[Keep dot segments in the URL path]' \
+        '--chunked[Chunked transfer encoding]' \
+        '--verify[TLS verification: yes/no/CA path]:verify:' \
+        '--ssl[Force a TLS version]:version:(tls1.2 tls1.3)' \
+        '--ciphers[Allowed TLS cipher suites]:ciphers:' \
+        '--cert[Client certificate (PEM)]:cert:_files' \
+        '--cert-key[Client private key]:key:_files' \
+        '--cert-key-pass[Passphrase for the key]:pass:' \
+        '(-I --ignore-stdin)'{-I,--ignore-stdin}'[Never read piped stdin]' \
+        '--help[Show help]' \
+        '--manual[Show the manual]' \
+        '--version[Show the version]' \
+        '--traceback[Print the full error backtrace]' \
+        '--default-scheme[Scheme for scheme-less URLs]:scheme:' \
+        '--debug[Print diagnostic information]' \
+        '*:URL or request item:'
+}
+
+_furl "$@"
