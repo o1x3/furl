@@ -4,6 +4,7 @@
 //! binaries. The binaries are thin wrappers; all behavior lives here.
 
 pub mod cli;
+pub mod cookies;
 pub mod encoding;
 pub mod errors;
 pub mod help;
@@ -13,6 +14,7 @@ pub mod paths;
 pub mod request;
 mod run;
 pub mod status;
+pub mod transport;
 
 /// The furl version, taken from the crate metadata.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

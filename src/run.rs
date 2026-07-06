@@ -5,10 +5,12 @@ use std::io::{IsTerminal, Read, Write};
 use crate::cli::args::ParsedArgs;
 use crate::cli::items::process_items;
 use crate::cli::parser::{Outcome, UsageError, parse};
+use crate::cookies::Jar;
 use crate::errors::{runtime_error_line, usage_error_block};
-use crate::output::message::{RequestParts, render_request};
-use crate::request::{BuildContext, BuildError, build, split_credentials};
+use crate::output::message::{RequestParts, render_request, render_response_head};
+use crate::request::{BuildContext, BuildError, PreparedRequest, build, split_credentials};
 use crate::status::ExitStatus;
+use crate::transport::{self, RawResponse, TransportError, TransportOptions, tls};
 use crate::{Program, VERSION};
 
 /// Valid `--print` letters: request headers/body, response
@@ -53,8 +55,22 @@ pub fn run(program: Program) -> i32 {
 /// A failure on the way to (or during) the request.
 enum Failure {
     Usage(String),
-    Runtime { kind: String, message: String },
+    Runtime {
+        kind: String,
+        message: String,
+        status: ExitStatus,
+    },
     Annotated(String),
+}
+
+impl Failure {
+    fn runtime(kind: &str, message: impl Into<String>) -> Failure {
+        Failure::Runtime {
+            kind: kind.to_string(),
+            message: message.into(),
+            status: ExitStatus::Error,
+        }
+    }
 }
 
 fn report_failure(program_name: &str, failure: Failure, _traceback: bool) -> i32 {
@@ -66,9 +82,13 @@ fn report_failure(program_name: &str, failure: Failure, _traceback: bool) -> i32
             };
             exit_usage(program_name, &error, 1)
         }
-        Failure::Runtime { kind, message } => {
+        Failure::Runtime {
+            kind,
+            message,
+            status,
+        } => {
             eprint!("{}", runtime_error_line(program_name, &kind, &message));
-            ExitStatus::Error.code()
+            status.code()
         }
         Failure::Annotated(rendered) => {
             eprintln!("{rendered}");
@@ -193,10 +213,7 @@ fn execute(
         let mut bytes = Vec::new();
         std::io::stdin()
             .read_to_end(&mut bytes)
-            .map_err(|error| Failure::Runtime {
-                kind: "IOError".to_string(),
-                message: error.to_string(),
-            })?;
+            .map_err(|error| Failure::runtime("IOError", error.to_string()))?;
         Some(bytes)
     } else {
         None
@@ -213,15 +230,11 @@ fn execute(
     })
     .map_err(|error| match error {
         BuildError::Usage(message) => Failure::Usage(message),
-        BuildError::InvalidUrl { url, reason } => Failure::Runtime {
-            kind: "InvalidURL".to_string(),
-            message: format!("Invalid URL '{url}': {reason}"),
-        },
+        BuildError::InvalidUrl { url, reason } => {
+            Failure::runtime("InvalidURL", format!("Invalid URL '{url}': {reason}"))
+        }
         BuildError::NestedJson(error) => Failure::Annotated(error.to_string()),
-        BuildError::Body(message) => Failure::Runtime {
-            kind: "IOError".to_string(),
-            message,
-        },
+        BuildError::Body(message) => Failure::runtime("IOError", message),
         BuildError::PasswordRequired { user } => Failure::Usage(format!(
             "Unable to prompt for passwords because --ignore-stdin is set. \
              (username: {user})"
@@ -242,12 +255,321 @@ fn execute(
         return Ok(ExitStatus::Success);
     }
 
-    Err(Failure::Runtime {
-        kind: "NotImplemented".to_string(),
-        message: "sending requests over the network is not wired up yet; \
-                  use --offline"
-            .to_string(),
-    })
+    execute_online(args, request)
+}
+
+const BINARY_NOTICE: &[u8] = b"+-----------------------------------------+\n\
+      | NOTE: binary data not shown in terminal |\n\
+      +-----------------------------------------+";
+
+/// Where terminal output goes: stdout, an `--output` file, or nowhere.
+enum Sink {
+    Stdout,
+    File(std::fs::File),
+    Null,
+}
+
+/// Writes messages with the separator rules of the output pipeline.
+struct Emitter {
+    sink: Sink,
+    tty: bool,
+    previous_printed_body: bool,
+}
+
+impl Emitter {
+    fn write(&mut self, bytes: &[u8]) {
+        match &mut self.sink {
+            Sink::Stdout => {
+                let stdout = std::io::stdout();
+                stdout.lock().write_all(bytes).ok();
+            }
+            Sink::File(file) => {
+                file.write_all(bytes).ok();
+            }
+            Sink::Null => {}
+        }
+    }
+
+    /// One message: optional head block, optional body.
+    fn message(&mut self, head: Option<&str>, body: Option<&[u8]>) {
+        let body_bytes = body.unwrap_or_default();
+        let prints_body = body.is_some() && !body_bytes.is_empty();
+        if head.is_none() && !prints_body {
+            return;
+        }
+        if self.previous_printed_body && !self.tty {
+            self.write(b"\n\n");
+        }
+        if let Some(head) = head {
+            self.write(head.as_bytes());
+            self.write(b"\r\n\r\n");
+        }
+        if prints_body {
+            // Binary suppression is mode-gated; the interim pipeline
+            // treats the terminal as a non-raw stream.
+            if self.tty && body_bytes.contains(&0) {
+                if head.is_some() {
+                    self.write(b"\n");
+                }
+                self.write(BINARY_NOTICE);
+            } else {
+                self.write(body_bytes);
+            }
+        }
+        if self.tty && prints_body {
+            self.write(b"\n\n");
+        }
+        self.previous_printed_body = prints_body;
+    }
+
+    fn finish(&mut self) {
+        if let Sink::Stdout = self.sink {
+            std::io::stdout().flush().ok();
+        }
+    }
+}
+
+/// The effective print letters for online exchanges.
+fn online_letters(args: &ParsedArgs, stdout_tty: bool) -> String {
+    if let Some(explicit) = &args.print {
+        return explicit.clone();
+    }
+    let mut letters = match args.verbose {
+        0 if stdout_tty => "hb".to_string(),
+        0 => "b".to_string(),
+        1 => "HBhb".to_string(),
+        _ => "HBhbm".to_string(),
+    };
+    if args.download {
+        letters.retain(|c| c != 'b');
+    }
+    letters
+}
+
+fn resolve_tls(args: &ParsedArgs) -> tls::TlsOptions {
+    let verify = match args.verify.to_ascii_lowercase().as_str() {
+        "no" | "false" => tls::Verification::Insecure,
+        "yes" | "true" => tls::Verification::Platform,
+        _ => tls::Verification::CaBundle(crate::paths::expand_tilde(&args.verify)),
+    };
+    let version = match args.ssl.as_deref() {
+        Some("tls1.2") => Some(tls::TlsVersion::Tls12),
+        Some("tls1.3") => Some(tls::TlsVersion::Tls13),
+        _ => None,
+    };
+    tls::TlsOptions {
+        verify,
+        version,
+        client_cert: args.cert.as_deref().map(crate::paths::expand_tilde),
+        client_key: args.cert_key.as_deref().map(crate::paths::expand_tilde),
+    }
+}
+
+fn transport_failure(error: TransportError, timeout: f64) -> Failure {
+    match error {
+        TransportError::Timeout => Failure::Runtime {
+            kind: "".to_string(),
+            message: format!(
+                "Request timed out ({}s).",
+                crate::json::dumps(
+                    &crate::json::Value::from(timeout),
+                    &crate::json::DumpOptions::default()
+                )
+            ),
+            status: ExitStatus::ErrorTimeout,
+        },
+        TransportError::Connection(message) => Failure::runtime("ConnectionError", message),
+        TransportError::Tls(message) => Failure::runtime("SSLError", message),
+        TransportError::Protocol(message) => Failure::runtime("ConnectionError", message),
+        TransportError::TooManyHeaders(count) => {
+            Failure::runtime("ConnectionError", format!("got more than {count} headers"))
+        }
+    }
+}
+
+fn is_redirect_status(status: u16) -> bool {
+    matches!(status, 301 | 302 | 303 | 307 | 308)
+}
+
+/// Rewrite the request for the next hop of a redirect chain.
+fn rebuild_for_redirect(
+    mut request: PreparedRequest,
+    response: &RawResponse,
+    jar: &Jar,
+) -> Result<PreparedRequest, Failure> {
+    let location = response
+        .header("Location")
+        .expect("redirect checked for Location");
+    let previous_host = request.url.host_str().map(str::to_string);
+    let previous_fragment = request.url.fragment().map(str::to_string);
+    let target = request.url.join(&location).map_err(|error| {
+        Failure::runtime("InvalidURL", format!("Invalid URL '{location}': {error}"))
+    })?;
+    request.url = target;
+    if request.url.fragment().is_none() {
+        if let Some(fragment) = previous_fragment {
+            request.url.set_fragment(Some(&fragment));
+        }
+    }
+    request.path_override = None;
+
+    // Method rewriting: 303 (and browser-compatible 301/302 for POST)
+    // turn into bodyless GETs.
+    let method_changes = match response.status {
+        303 => request.method != "HEAD",
+        301 | 302 => request.method == "POST",
+        _ => false,
+    };
+    if method_changes {
+        request.method = "GET".to_string();
+        request.body = None;
+        request.chunked = false;
+        request.headers.entries.retain(|(name, _)| {
+            !(name.eq_ignore_ascii_case("content-length")
+                || name.eq_ignore_ascii_case("content-type")
+                || name.eq_ignore_ascii_case("transfer-encoding"))
+        });
+    }
+
+    // Credentials never travel to a different host.
+    let host = request.url.host_str().unwrap_or_default().to_string();
+    if previous_host.as_deref() != Some(host.as_str()) {
+        request
+            .headers
+            .entries
+            .retain(|(name, _)| !name.eq_ignore_ascii_case("authorization"));
+    }
+
+    // The Cookie header is rebuilt from the jar on every hop.
+    request
+        .headers
+        .entries
+        .retain(|(name, _)| !name.eq_ignore_ascii_case("cookie"));
+    if let Some(value) = jar.header_for(request.url.scheme(), &host, request.url.path()) {
+        request.headers.entries.push(("Cookie".to_string(), value));
+    }
+
+    // Host header value for the new target.
+    let default_port = request.url.port_or_known_default();
+    let explicit_port = request.url.port();
+    request.host_netloc = match explicit_port {
+        Some(port) if Some(port) != default_port => format!("{host}:{port}"),
+        Some(port) => format!("{host}:{port}"),
+        None => host,
+    };
+    Ok(request)
+}
+
+fn execute_online(args: &ParsedArgs, request: PreparedRequest) -> Result<ExitStatus, Failure> {
+    let options = TransportOptions {
+        timeout: (args.timeout > 0.0).then(|| std::time::Duration::from_secs_f64(args.timeout)),
+        tls: resolve_tls(args),
+        max_headers: usize::try_from(args.max_headers.max(0)).unwrap_or(0),
+    };
+    let follow = args.follow || args.download;
+    let show_all = args.all || args.verbose > 0;
+    let stdout_tty = std::io::stdout().is_terminal();
+    let letters = online_letters(args, stdout_tty);
+
+    // Quiet nulls terminal output, except an explicit --output file
+    // (without --download) still receives it.
+    let quiet_nulls_output = args.quiet > 0 && (args.output.is_none() || args.download);
+    let sink = if quiet_nulls_output {
+        Sink::Null
+    } else if let Some(path) = &args.output {
+        let file = std::fs::File::create(path)
+            .map_err(|error| Failure::runtime("IOError", format!("{path}: {error}")))?;
+        Sink::File(file)
+    } else {
+        Sink::Stdout
+    };
+    let tty = stdout_tty && args.output.is_none() && args.quiet == 0;
+    let mut emitter = Emitter {
+        sink,
+        tty,
+        previous_printed_body: false,
+    };
+
+    let mut jar = Jar::new();
+    let mut current = request;
+    let mut hops: i64 = 0;
+    loop {
+        let response =
+            transport::send(&current, &options).map_err(|e| transport_failure(e, args.timeout))?;
+
+        let host = current.url.host_str().unwrap_or_default().to_string();
+        for (name, value) in &response.headers {
+            if name.eq_ignore_ascii_case("set-cookie") {
+                jar.store(&host, &String::from_utf8_lossy(value));
+            }
+        }
+
+        let wants_redirect =
+            follow && is_redirect_status(response.status) && response.header("Location").is_some();
+        let over_limit = wants_redirect && args.max_redirects > 0 && hops >= args.max_redirects;
+        if over_limit {
+            emitter.finish();
+            return Err(Failure::Runtime {
+                kind: "TooManyRedirects".to_string(),
+                message: format!(
+                    "Too many redirects (--max-redirects={}).",
+                    args.max_redirects
+                ),
+                status: ExitStatus::ErrorTooManyRedirects,
+            });
+        }
+        let is_final = !wants_redirect;
+
+        if is_final || show_all {
+            let request_head = letters.contains('H').then(|| {
+                String::from_utf8_lossy(&render_request(
+                    &current,
+                    RequestParts {
+                        headers: true,
+                        body: false,
+                    },
+                ))
+                .trim_end_matches("\r\n\r\n")
+                .to_string()
+            });
+            let request_body = letters.contains('B').then(|| {
+                current
+                    .body
+                    .as_ref()
+                    .map(|b| b.bytes.clone())
+                    .unwrap_or_default()
+            });
+            emitter.message(request_head.as_deref(), request_body.as_deref());
+
+            let response_head = letters
+                .contains('h')
+                .then(|| render_response_head(&response));
+            let response_body = letters
+                .contains('b')
+                .then(|| transport::decoded_body(&response));
+            emitter.message(response_head.as_deref(), response_body.as_deref());
+        }
+
+        if is_final {
+            emitter.finish();
+            let mut exit = ExitStatus::Success;
+            if args.check_status || args.download {
+                exit = ExitStatus::from_http_status(response.status, follow);
+                if exit != ExitStatus::Success {
+                    let suppress = tty && args.quiet >= 2;
+                    if !suppress {
+                        eprint!(
+                            "\nfurl: warning: HTTP {} {}\n\n",
+                            response.status, response.reason
+                        );
+                    }
+                }
+            }
+            return Ok(exit);
+        }
+        hops += 1;
+        current = rebuild_for_redirect(current, &response, &jar)?;
+    }
 }
 
 fn default_scheme(program: Program, args: &ParsedArgs) -> &str {

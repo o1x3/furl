@@ -1,6 +1,46 @@
 //! Rendering HTTP messages for display.
 
 use crate::request::PreparedRequest;
+use crate::transport::RawResponse;
+
+/// The response head: status line plus headers, received case and order.
+///
+/// Duplicate headers fold into one comma-joined line at the first
+/// occurrence — except `Set-Cookie`, which renders one line per cookie,
+/// pulled to the end of the block.
+pub fn render_response_head(response: &RawResponse) -> String {
+    let mut head = format!(
+        "HTTP/{} {} {}",
+        response.http_version, response.status, response.reason
+    );
+    let mut seen: Vec<&str> = Vec::new();
+    let mut set_cookies: Vec<String> = Vec::new();
+    for (name, value) in &response.headers {
+        if name.eq_ignore_ascii_case("set-cookie") {
+            set_cookies.push(String::from_utf8_lossy(value).to_string());
+            continue;
+        }
+        if seen.iter().any(|s| s.eq_ignore_ascii_case(name)) {
+            continue;
+        }
+        seen.push(name);
+        let folded: Vec<String> = response
+            .headers
+            .iter()
+            .filter(|(n, _)| n.eq_ignore_ascii_case(name))
+            .map(|(_, v)| String::from_utf8_lossy(v).to_string())
+            .collect();
+        head.push_str("\r\n");
+        head.push_str(name);
+        head.push_str(": ");
+        head.push_str(&folded.join(", "));
+    }
+    for cookie in set_cookies {
+        head.push_str("\r\nSet-Cookie: ");
+        head.push_str(&cookie);
+    }
+    head
+}
 
 /// Which request parts to include.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
