@@ -134,6 +134,19 @@ pub fn build(context: &BuildContext<'_>) -> Result<PreparedRequest, BuildError> 
         url.set_query(Some(&merged));
     }
 
+    // Requote: percent-escapes of unreserved characters decode back to
+    // the bare character; any malformed escape disables the pass.
+    let requoted_path = unquote_unreserved(url.path());
+    if requoted_path != url.path() {
+        url.set_path(&requoted_path);
+    }
+    if let Some(query) = url.query() {
+        let requoted = unquote_unreserved(query);
+        if requoted != query {
+            url.set_query(Some(&requoted));
+        }
+    }
+
     // -- Body (single-source rule) ---------------------------------------
     let data_items_present = !items.data.is_empty() || !items.files.is_empty();
     let source_count = usize::from(data_items_present)
@@ -141,12 +154,12 @@ pub fn build(context: &BuildContext<'_>) -> Result<PreparedRequest, BuildError> 
         + usize::from(context.stdin_body.is_some())
         + usize::from(items.body_file.is_some());
     if source_count > 1 {
-        return Err(BuildError::Usage(
+        return Err(BuildError::Usage(format!(
             "Request body (from stdin, --raw or a file) and request data \
              (key=value) cannot be mixed. Pass --ignore-stdin to let \
-             key/value take priority."
-                .to_string(),
-        ));
+             key/value take priority. See {} for details.",
+            crate::errors::DOCS_URL,
+        )));
     }
 
     let mut file_content_type: Option<String> = None;
@@ -160,10 +173,16 @@ pub fn build(context: &BuildContext<'_>) -> Result<PreparedRequest, BuildError> 
             boundary: None,
         })
     } else if let Some(raw) = &args.raw {
-        Some(Body {
-            bytes: raw.clone().into_bytes(),
-            boundary: None,
-        })
+        // An empty --raw counts as a body source (mixing rules, POST
+        // implication) but attaches no body at all.
+        if raw.is_empty() {
+            None
+        } else {
+            Some(Body {
+                bytes: raw.clone().into_bytes(),
+                boundary: None,
+            })
+        }
     } else if let Some(stdin) = &context.stdin_body {
         Some(Body {
             bytes: stdin.clone(),
@@ -177,44 +196,50 @@ pub fn build(context: &BuildContext<'_>) -> Result<PreparedRequest, BuildError> 
     } else if form_mode {
         body::form_body(items)
     } else {
-        map_body_error(body::json_body(items))?
+        body::json_body(items)
     };
 
     // -- Headers -----------------------------------------------------------
     let mut app_headers = HeaderSet::new();
     app_headers.set("User-Agent", &format!("furl/{}", context.version));
 
+    // An empty --raw is "no data" for header defaults (though it still
+    // implies POST); attached stdin counts even when empty.
     let data_present = !items.data.is_empty()
         || items.body_file.is_some()
-        || args.raw.is_some()
+        || args.raw.as_deref().is_some_and(|raw| !raw.is_empty())
         || context.stdin_body.is_some();
     let json_applies = !form_mode && (args.request_type == Some(RequestType::Json) || data_present);
     if json_applies {
         app_headers.set("Accept", JSON_ACCEPT);
         app_headers.set("Content-Type", JSON_CONTENT_TYPE);
-    } else if form_mode && !multipart_mode {
+    } else if form_mode && items.files.is_empty() {
+        // Seeded even under --multipart (without files); the multipart
+        // type below then takes over this slot.
         app_headers.set("Content-Type", FORM_CONTENT_TYPE);
     }
     if let Some(mime) = &file_content_type {
         app_headers.set("Content-Type", mime);
     }
-
     app_headers.apply_cli_items(&items.headers);
 
+    // The multipart type is decided after the CLI overlay. Only a
+    // CLI-supplied Content-Type influences it (a seeded default is
+    // overwritten); the final value lands in the existing slot or
+    // appends when no slot exists.
     if multipart_mode {
-        match app_headers.get("Content-Type") {
-            None => {
-                app_headers.set(
-                    "Content-Type",
-                    &format!("multipart/form-data; boundary={boundary}"),
-                );
-            }
-            Some(user_type) if !user_type.contains("boundary=") => {
-                let with_boundary = format!("{user_type}; boundary={boundary}");
-                app_headers.set("Content-Type", &with_boundary);
-            }
-            Some(_) => {} // user boundary parameter: kept verbatim
-        }
+        let cli_content_type = items
+            .headers
+            .iter()
+            .rev()
+            .find(|h| h.name.eq_ignore_ascii_case("content-type"))
+            .and_then(|h| h.value.clone());
+        let final_type = match cli_content_type {
+            Some(user_type) if user_type.contains("boundary=") => user_type,
+            Some(user_type) => format!("{user_type}; boundary={boundary}"),
+            None => format!("multipart/form-data; boundary={boundary}"),
+        };
+        app_headers.set("Content-Type", &final_type);
     }
 
     // -- Method -------------------------------------------------------------
@@ -226,12 +251,15 @@ pub fn build(context: &BuildContext<'_>) -> Result<PreparedRequest, BuildError> 
 
     // -- Wire headers + auth ---------------------------------------------------
     let body_length = built_body.as_ref().map(|b| b.bytes.len() as u64);
-    let mut wire = headers::assemble(&app_headers, &method, body_length, args.chunked);
-    if let Some(authorization) = resolve_authorization(args, userinfo.as_ref())? {
-        if wire.get("Authorization").is_none() {
-            wire.entries.push(("Authorization".into(), authorization));
-        }
-    }
+    let authorization = resolve_authorization(args, userinfo.as_ref())?
+        .filter(|_| !app_headers.contains("Authorization"));
+    let wire = headers::assemble(
+        &app_headers,
+        &method,
+        body_length,
+        args.chunked,
+        authorization,
+    );
 
     Ok(PreparedRequest {
         method,
@@ -246,7 +274,6 @@ pub fn build(context: &BuildContext<'_>) -> Result<PreparedRequest, BuildError> 
 
 fn map_body_error<T>(result: Result<T, body::BodyError>) -> Result<T, BuildError> {
     result.map_err(|error| match error {
-        body::BodyError::NestedJson(e) => BuildError::NestedJson(e),
         body::BodyError::File { message } => BuildError::Body(message),
     })
 }
@@ -269,6 +296,48 @@ fn extract_userinfo(url: &mut url::Url) -> Option<(String, String)> {
     let _ = url.set_username("");
     let _ = url.set_password(None);
     Some((user, password))
+}
+
+/// Decode percent-escapes of unreserved characters (letters, digits,
+/// `-._~`) back to the bare character. A malformed escape anywhere turns
+/// the whole pass off, leaving the text untouched.
+fn unquote_unreserved(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut has_malformed = false;
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            let decoded = bytes.get(i + 1..i + 3).and_then(|hex| {
+                let hi = (hex[0] as char).to_digit(16)?;
+                let lo = (hex[1] as char).to_digit(16)?;
+                Some((hi * 16 + lo) as u8)
+            });
+            match decoded {
+                Some(byte)
+                    if byte.is_ascii_alphanumeric()
+                        || matches!(byte, b'-' | b'.' | b'_' | b'~') =>
+                {
+                    out.push(byte as char);
+                    i += 3;
+                }
+                Some(_) => {
+                    out.push_str(&text[i..i + 3]);
+                    i += 3;
+                }
+                None => {
+                    has_malformed = true;
+                    break;
+                }
+            }
+        } else {
+            // Advance one full character (the text is valid UTF-8).
+            let c = text[i..].chars().next().expect("in-bounds char");
+            out.push(c);
+            i += c.len_utf8();
+        }
+    }
+    if has_malformed { text.to_string() } else { out }
 }
 
 /// Decode percent escapes; malformed escapes stay literal.
@@ -308,10 +377,12 @@ fn netloc_of(normalized_url: &str) -> String {
         .find(['/', '?', '#'])
         .unwrap_or(after_scheme.len());
     let authority = &after_scheme[..authority_end];
-    match authority.rfind('@') {
-        Some(at) => authority[at + 1..].to_string(),
-        None => authority.to_string(),
-    }
+    let host_port = match authority.rfind('@') {
+        Some(at) => &authority[at + 1..],
+        None => authority,
+    };
+    // Hostnames compare case-insensitively; the wire form is lowercase.
+    host_port.to_lowercase()
 }
 
 /// The path exactly as typed (before normalization), for `--path-as-is`.

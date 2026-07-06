@@ -1,6 +1,7 @@
 //! Request-item processing: from raw item tokens to the collections a
 //! request is built from.
 
+use crate::cli::nested_json::{NestedJson, NestedJsonError};
 use crate::json;
 use crate::paths::expand_tilde;
 
@@ -50,6 +51,8 @@ pub struct RequestItems {
     pub params: Vec<(String, String)>,
     pub data: Vec<(String, DataValue)>,
     pub files: Vec<FileField>,
+    /// JSON mode: the data items folded through the nested-JSON syntax.
+    pub json_data: Option<json::Value>,
     /// `=`, `=@`, and `@` items in original order (multipart framing).
     pub multipart_sequence: Vec<MultipartEntry>,
     pub body_file: Option<BodyFile>,
@@ -62,17 +65,18 @@ impl RequestItems {
     }
 }
 
-/// An item-processing failure; rendered as a usage error.
+/// An item-processing failure.
 #[derive(Debug, Clone, PartialEq)]
-pub struct ItemError {
-    pub message: String,
+pub enum ItemError {
+    /// Rendered as a usage error.
+    Message(String),
+    /// Nested-JSON errors carry their own annotated rendering.
+    NestedJson(NestedJsonError),
 }
 
 impl ItemError {
     fn new(message: impl Into<String>) -> ItemError {
-        ItemError {
-            message: message.into(),
-        }
+        ItemError::Message(message.into())
     }
 }
 
@@ -92,7 +96,54 @@ pub fn process_items(
     let mut invalid_file_fields: Vec<String> = Vec::new();
     let mut body_files_seen = 0usize;
 
-    for token in tokens {
+    // JSON mode evaluates every data item first — all values (including
+    // embedded files and raw JSON) resolve as a batch, then fold through
+    // the nested-JSON syntax — before any other item is examined.
+    let mut remaining: Vec<&String> = Vec::new();
+    if form_mode {
+        remaining.extend(tokens);
+    } else {
+        let mut json_items: Vec<&String> = Vec::new();
+        for token in tokens {
+            match split_item(token, ALL_SEPARATORS) {
+                Ok(split)
+                    if split.separator.is_data() && split.separator != Separator::FileUpload =>
+                {
+                    json_items.push(token);
+                }
+                _ => remaining.push(token),
+            }
+        }
+        if !json_items.is_empty() {
+            for token in &json_items {
+                let split = split_item(token, ALL_SEPARATORS).expect("split checked above");
+                let value = match split.separator {
+                    Separator::Data => DataValue::Text(split.value),
+                    Separator::DataFromFile => {
+                        DataValue::Text(read_text_file(token, &split.value)?)
+                    }
+                    Separator::RawJson => parse_json_value(token, &split.value, false)?,
+                    Separator::RawJsonFromFile => {
+                        let text = read_text_file(token, &split.value)?;
+                        parse_json_value(token, &text, false)?
+                    }
+                    _ => unreachable!("only data separators reach the JSON batch"),
+                };
+                items.data.push((split.key, value));
+            }
+            let mut nested = NestedJson::new();
+            for (key, value) in &items.data {
+                let value = match value {
+                    DataValue::Text(text) => json::Value::String(text.clone()),
+                    DataValue::Json(value) => value.clone(),
+                };
+                nested.assign(key, value).map_err(ItemError::NestedJson)?;
+            }
+            items.json_data = Some(nested.finish());
+        }
+    }
+
+    for token in remaining {
         let split = split_item(token, ALL_SEPARATORS)
             .map_err(|_| ItemError::new(format!("'{token}' is not a valid value")))?;
         let key = split.key;
@@ -105,7 +156,7 @@ pub fn process_items(
             Separator::HeaderEmpty => {
                 if !value.is_empty() {
                     return Err(ItemError::new(format!(
-                        "Invalid item '{token}' (to specify an empty header use 'Header;')"
+                        "Invalid item '{token}' (to specify an empty header use `Header;`)"
                     )));
                 }
                 items.headers.push(HeaderItem {
@@ -176,6 +227,8 @@ pub fn process_items(
     }
 
     if !invalid_file_fields.is_empty() {
+        invalid_file_fields.sort();
+        invalid_file_fields.dedup();
         return Err(ItemError::new(format!(
             "Invalid file fields (perhaps you meant --form?): {}",
             invalid_file_fields.join(", ")

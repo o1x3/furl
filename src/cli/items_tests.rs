@@ -14,9 +14,10 @@ fn ok(list: &[&str], request_type: Option<RequestType>) -> super::items::Request
 
 #[track_caller]
 fn err(list: &[&str], request_type: Option<RequestType>) -> String {
-    process_items(&tokens(list), request_type)
-        .expect_err("expected an item error")
-        .message
+    match process_items(&tokens(list), request_type).expect_err("expected an item error") {
+        super::items::ItemError::Message(message) => message,
+        super::items::ItemError::NestedJson(error) => error.to_string(),
+    }
 }
 
 fn temp_file(content: &[u8], suffix: &str) -> tempfile::NamedTempFile {
@@ -54,7 +55,7 @@ fn header_variants() {
 fn empty_header_with_junk_is_an_error() {
     assert_eq!(
         err(&["Name;junk"], None),
-        "Invalid item 'Name;junk' (to specify an empty header use 'Header;')"
+        "Invalid item 'Name;junk' (to specify an empty header use `Header;`)"
     );
 }
 

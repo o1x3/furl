@@ -75,14 +75,29 @@ impl HeaderSet {
         for item in items {
             match &item.value {
                 Some(value) => {
-                    let seen = replaced.iter().any(|n| n.eq_ignore_ascii_case(&item.name));
-                    if !seen {
-                        self.remove(&item.name);
-                        replaced.push(item.name.clone());
-                    }
-                    self.deleted.retain(|n| !n.eq_ignore_ascii_case(&item.name));
                     let value = value.trim_matches(|c: char| c.is_ascii_whitespace());
-                    self.entries.push((item.name.clone(), value.to_string()));
+                    let seen = replaced.iter().any(|n| n.eq_ignore_ascii_case(&item.name));
+                    self.deleted.retain(|n| !n.eq_ignore_ascii_case(&item.name));
+                    if seen {
+                        // Repetition accumulates adjacent to the first
+                        // occurrence's slot.
+                        let after = self
+                            .entries
+                            .iter()
+                            .rposition(|(n, _)| n.eq_ignore_ascii_case(&item.name))
+                            .map(|at| at + 1)
+                            .unwrap_or(self.entries.len());
+                        self.entries
+                            .insert(after, (item.name.clone(), value.to_string()));
+                    } else {
+                        replaced.push(item.name.clone());
+                        // The first occurrence replaces a default in its
+                        // slot, keeping the default's position.
+                        match self.position(&item.name) {
+                            Some(at) => self.entries[at].1 = value.to_string(),
+                            None => self.entries.push((item.name.clone(), value.to_string())),
+                        }
+                    }
                 }
                 None => {
                     self.remove(&item.name);
@@ -134,6 +149,7 @@ pub fn assemble(
     method: &str,
     body_length: Option<u64>,
     chunked: bool,
+    authorization: Option<String>,
 ) -> WireHeaders {
     let mut wire: Vec<(String, String)> = Vec::new();
 
@@ -149,33 +165,39 @@ pub fn assemble(
         }
     }
 
-    // Content-Length / Transfer-Encoding.
+    // Content-Length: computed independently of --chunked (both headers
+    // can legitimately appear together, matching the reference stack).
     let method_upper = method.to_ascii_uppercase();
-    if chunked {
-        if !app_headers.contains("Transfer-Encoding") {
-            wire.push(("Transfer-Encoding".into(), "chunked".into()));
-        }
-    } else {
-        match body_length {
-            // A computed length always wins over a user-supplied one.
-            Some(length) => wire.push(("Content-Length".into(), length.to_string())),
-            None => {
-                let implied_zero = !matches!(method_upper.as_str(), "GET" | "HEAD")
-                    && app_headers.get("Content-Length").is_none();
-                if implied_zero && method_upper != "OPTIONS" {
-                    wire.push(("Content-Length".into(), "0".to_string()));
-                }
+    match body_length {
+        // A computed length always wins over a user-supplied one.
+        Some(length) => wire.push(("Content-Length".into(), length.to_string())),
+        None => {
+            let implied_zero = !matches!(method_upper.as_str(), "GET" | "HEAD")
+                && app_headers.get("Content-Length").is_none();
+            if implied_zero && method_upper != "OPTIONS" {
+                wire.push(("Content-Length".into(), "0".to_string()));
             }
         }
+    }
+
+    // Credentials computed from --auth/userinfo slot in after the body
+    // headers (an explicit Authorization header stays application-side).
+    if let Some(value) = authorization {
+        wire.push(("Authorization".into(), value));
     }
 
     // Application layer, insertion order. A user Content-Length is
     // dropped when a computed one exists.
     for (name, value) in app_headers.pairs() {
-        if name.eq_ignore_ascii_case("content-length") && !chunked && body_length.is_some() {
+        if name.eq_ignore_ascii_case("content-length") && body_length.is_some() {
             continue;
         }
         wire.push((name.to_string(), value.to_string()));
+    }
+
+    // The chunked marker lands after every application header.
+    if chunked && !app_headers.contains("Transfer-Encoding") {
+        wire.push(("Transfer-Encoding".into(), "chunked".into()));
     }
 
     WireHeaders {

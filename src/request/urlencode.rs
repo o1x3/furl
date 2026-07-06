@@ -23,13 +23,26 @@ pub fn quote_plus(text: &str) -> String {
     out
 }
 
-/// Encode ordered `(key, value)` pairs as a form body / query string.
+/// Encode `(key, value)` pairs as a form body / query string.
+///
+/// Repeated keys group together: keys emit in first-occurrence order,
+/// each with all its values in their own order (multi-map iteration).
 pub fn urlencode(pairs: &[(String, String)]) -> String {
-    pairs
-        .iter()
-        .map(|(key, value)| format!("{}={}", quote_plus(key), quote_plus(value)))
-        .collect::<Vec<_>>()
-        .join("&")
+    let mut key_order: Vec<&String> = Vec::new();
+    for (key, _) in pairs {
+        if !key_order.contains(&key) {
+            key_order.push(key);
+        }
+    }
+    let mut encoded: Vec<String> = Vec::new();
+    for key in key_order {
+        for (k, value) in pairs {
+            if k == key {
+                encoded.push(format!("{}={}", quote_plus(k), quote_plus(value)));
+            }
+        }
+    }
+    encoded.join("&")
 }
 
 #[cfg(test)]

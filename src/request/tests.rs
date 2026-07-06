@@ -328,10 +328,15 @@ fn compress_conflicts() {
 }
 
 #[test]
-fn chunked_sets_transfer_encoding_instead_of_length() {
+fn chunked_adds_transfer_encoding_after_everything() {
+    // Content-Length is still computed; the chunked marker rides last.
     let request = prepared(&["POST", "example.org", "--chunked", "a=b"]);
     assert_eq!(request.headers.get("Transfer-Encoding"), Some("chunked"));
-    assert_eq!(request.headers.get("Content-Length"), None);
+    assert_eq!(request.headers.get("Content-Length"), Some("10"));
+    assert_eq!(
+        request.headers.entries.last().map(|(n, _)| n.as_str()),
+        Some("Transfer-Encoding")
+    );
 }
 
 #[test]

@@ -1,7 +1,6 @@
 //! Request body construction.
 
 use crate::cli::items::{DataValue, MultipartEntry, RequestItems};
-use crate::cli::nested_json::{NestedJson, NestedJsonError};
 use crate::json;
 
 use super::urlencode::urlencode;
@@ -25,25 +24,14 @@ impl Body {
 
 #[derive(Debug)]
 pub enum BodyError {
-    NestedJson(NestedJsonError),
     File { message: String },
 }
 
-/// Fold JSON-mode data items into the serialized body.
-pub fn json_body(items: &RequestItems) -> Result<Option<Body>, BodyError> {
-    if items.data.is_empty() {
-        return Ok(None);
-    }
-    let mut nested = NestedJson::new();
-    for (key, value) in &items.data {
-        let value = match value {
-            DataValue::Text(text) => json::Value::String(text.clone()),
-            DataValue::Json(value) => value.clone(),
-        };
-        nested.assign(key, value).map_err(BodyError::NestedJson)?;
-    }
-    let text = json::dumps(&nested.finish(), &json::DumpOptions::default());
-    Ok(Some(Body::plain(text.into_bytes())))
+/// Serialize the pre-folded JSON-mode data body.
+pub fn json_body(items: &RequestItems) -> Option<Body> {
+    let value = items.json_data.as_ref()?;
+    let text = json::dumps(value, &json::DumpOptions::default());
+    Some(Body::plain(text.into_bytes()))
 }
 
 /// Serialize form data items as urlencoded pairs.

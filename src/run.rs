@@ -137,8 +137,9 @@ fn execute(
         if !is_method_like {
             // The "method" was really the URL: the URL slot holds an item.
             let item = std::mem::replace(&mut args.url, method);
-            ParsedArgs::validate_item_token(&item)
-                .map_err(|detail| Failure::Usage(format!("argument REQUEST_ITEM: {detail}")))?;
+            // Unlike parse-time item validation, the shift error carries
+            // no argparse-style prefix.
+            ParsedArgs::validate_item_token(&item).map_err(Failure::Usage)?;
             let item_is_data = crate::cli::args::token_has_data_separator(&item);
             args.request_items.insert(0, item);
             args.method = Some(guess_method(
@@ -154,8 +155,13 @@ fn execute(
     }
 
     // -- Items -------------------------------------------------------------
-    let items = process_items(&args.request_items, args.request_type)
-        .map_err(|error| Failure::Usage(error.message))?;
+    let items =
+        process_items(&args.request_items, args.request_type).map_err(|error| match error {
+            crate::cli::items::ItemError::Message(message) => Failure::Usage(message),
+            crate::cli::items::ItemError::NestedJson(error) => {
+                Failure::Annotated(error.to_string())
+            }
+        })?;
 
     // -- Auth password prompt ------------------------------------------------
     let auth_type = args.auth_type.as_deref().unwrap_or("basic");
@@ -180,7 +186,10 @@ fn execute(
     }
 
     // -- Body from stdin -----------------------------------------------------
-    let stdin_body = if stdin_available && args.raw.is_none() {
+    // Available stdin always counts as a body source — even empty — so
+    // conflicts with --raw and data items surface, and an empty piped
+    // body still triggers data-driven defaults.
+    let stdin_body = if stdin_available {
         let mut bytes = Vec::new();
         std::io::stdin()
             .read_to_end(&mut bytes)
@@ -188,7 +197,7 @@ fn execute(
                 kind: "IOError".to_string(),
                 message: error.to_string(),
             })?;
-        if bytes.is_empty() { None } else { Some(bytes) }
+        Some(bytes)
     } else {
         None
     };
