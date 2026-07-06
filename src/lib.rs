@@ -4,6 +4,7 @@
 //! binaries. The binaries are thin wrappers; all behavior lives here.
 
 pub mod cli;
+pub mod json;
 pub mod status;
 
 /// The furl version, taken from the crate metadata.
