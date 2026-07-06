@@ -278,9 +278,11 @@ const BINARY_NOTICE: &[u8] = b"+-----------------------------------------+\n\
       | NOTE: binary data not shown in terminal |\n\
       +-----------------------------------------+";
 
-/// Where terminal output goes: stdout, an `--output` file, or nowhere.
+/// Where terminal output goes: stdout, stderr (download mode routes the
+/// non-body output there), an `--output` file, or nowhere.
 enum Sink {
     Stdout,
+    Stderr,
     File(std::fs::File),
     Null,
 }
@@ -314,6 +316,10 @@ impl Emitter {
             Sink::Stdout => {
                 let stdout = std::io::stdout();
                 stdout.lock().write_all(bytes).ok();
+            }
+            Sink::Stderr => {
+                let stderr = std::io::stderr();
+                stderr.lock().write_all(bytes).ok();
             }
             Sink::File(file) => {
                 file.write_all(bytes).ok();
@@ -371,8 +377,17 @@ impl Emitter {
     }
 
     fn finish(&mut self) {
-        if let Sink::Stdout = self.sink {
-            std::io::stdout().flush().ok();
+        match &mut self.sink {
+            Sink::Stdout => {
+                std::io::stdout().flush().ok();
+            }
+            Sink::Stderr => {
+                std::io::stderr().flush().ok();
+            }
+            Sink::File(file) => {
+                file.flush().ok();
+            }
+            Sink::Null => {}
         }
     }
 }
@@ -523,21 +538,35 @@ fn execute_online(args: &ParsedArgs, request: PreparedRequest) -> Result<ExitSta
     let follow = args.follow || args.download;
     let show_all = args.all || args.verbose > 0;
     let stdout_tty = std::io::stdout().is_terminal();
-    let letters = online_letters(args, stdout_tty);
+    let mut letters = online_letters(args, stdout_tty);
 
-    // Quiet nulls terminal output, except an explicit --output file
-    // (without --download) still receives it.
-    let quiet_nulls_output = args.quiet > 0 && (args.output.is_none() || args.download);
-    let sink = if quiet_nulls_output {
-        Sink::Null
-    } else if let Some(path) = &args.output {
-        let file = std::fs::File::create(path)
-            .map_err(|error| Failure::runtime("IOError", format!("{path}: {error}")))?;
-        Sink::File(file)
+    // Download mode routes every non-body part to stderr and sends the
+    // body to a file instead of the message printer.
+    let (sink, tty) = if args.download {
+        letters.retain(|c| c != 'b');
+        let stderr_tty = std::io::stderr().is_terminal();
+        let sink = if args.quiet > 0 {
+            Sink::Null
+        } else {
+            Sink::Stderr
+        };
+        (sink, stderr_tty && args.quiet == 0)
     } else {
-        Sink::Stdout
+        // Quiet nulls terminal output, except an explicit --output file
+        // (without --download) still receives it.
+        let quiet_nulls_output = args.quiet > 0 && args.output.is_none();
+        let sink = if quiet_nulls_output {
+            Sink::Null
+        } else if let Some(path) = &args.output {
+            let file = std::fs::File::create(path)
+                .map_err(|error| Failure::runtime("IOError", format!("{path}: {error}")))?;
+            Sink::File(file)
+        } else {
+            Sink::Stdout
+        };
+        let tty = stdout_tty && args.output.is_none() && args.quiet == 0;
+        (sink, tty)
     };
-    let tty = stdout_tty && args.output.is_none() && args.quiet == 0;
     let mut emitter = Emitter {
         sink,
         tty,
@@ -548,6 +577,26 @@ fn execute_online(args: &ParsedArgs, request: PreparedRequest) -> Result<ExitSta
 
     let mut jar = Jar::new();
     let mut current = request;
+    // The initial download URL drives the fallback filename.
+    let download_url = current.url.clone();
+    let resume_offset = download_resume_offset(args);
+    if args.download {
+        // Identity encoding keeps byte counts and resume offsets exact.
+        current
+            .headers
+            .entries
+            .retain(|(name, _)| !name.eq_ignore_ascii_case("accept-encoding"));
+        current
+            .headers
+            .entries
+            .push(("Accept-Encoding".to_string(), "identity".to_string()));
+        if let Some(offset) = resume_offset {
+            current
+                .headers
+                .entries
+                .push(("Range".to_string(), format!("bytes={offset}-")));
+        }
+    }
     let mut hops: i64 = 0;
     loop {
         let started_at = std::time::Instant::now();
@@ -632,10 +681,97 @@ fn execute_online(args: &ParsedArgs, request: PreparedRequest) -> Result<ExitSta
                     }
                 }
             }
+            // The body only downloads on a success status.
+            if args.download && exit == ExitStatus::Success {
+                write_download(args, &current, &download_url, &response, resume_offset)?;
+            }
             return Ok(exit);
         }
         hops += 1;
         current = rebuild_for_redirect(current, &response, &jar)?;
+    }
+}
+
+/// The byte offset to resume from: the size of an existing `--output`
+/// file when `--continue` is set.
+fn download_resume_offset(args: &ParsedArgs) -> Option<u64> {
+    if !args.download_resume {
+        return None;
+    }
+    let path = args.output.as_ref()?;
+    std::fs::metadata(path)
+        .ok()
+        .map(|m| m.len())
+        .filter(|&n| n > 0)
+}
+
+/// Write the downloaded body to its file and report the destination on
+/// stderr (unless quiet).
+fn write_download(
+    args: &ParsedArgs,
+    request: &PreparedRequest,
+    download_url: &url::Url,
+    response: &RawResponse,
+    resume_offset: Option<u64>,
+) -> Result<(), Failure> {
+    // The body is sent with Accept-Encoding: identity, so the raw bytes
+    // are the file contents.
+    let body = &response.body;
+
+    let resuming = resume_offset.is_some() && response.status == 206;
+    match &args.output {
+        Some(path) => {
+            let mut file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(resuming)
+                .write(true)
+                .truncate(!resuming)
+                .open(path)
+                .map_err(|error| Failure::runtime("IOError", format!("{path}: {error}")))?;
+            file.write_all(body)
+                .map_err(|error| Failure::runtime("IOError", format!("{path}: {error}")))?;
+            if args.quiet == 0 {
+                eprintln!("Done. {} written to {path}", human_size(body.len() as u64));
+            }
+        }
+        None if !std::io::stdout().is_terminal() => {
+            // Redirected stdout is itself the download target.
+            std::io::stdout()
+                .write_all(body)
+                .map_err(|error| Failure::runtime("IOError", error.to_string()))?;
+        }
+        None => {
+            let directory = std::env::current_dir().unwrap_or_else(|_| ".".into());
+            let path = crate::download::derive_filename(response, download_url, &directory);
+            std::fs::write(&path, body).map_err(|error| {
+                Failure::runtime("IOError", format!("{}: {error}", path.display()))
+            })?;
+            if args.quiet == 0 {
+                eprintln!(
+                    "Done. {} written to {}",
+                    human_size(body.len() as u64),
+                    path.display()
+                );
+            }
+        }
+    }
+    let _ = request;
+    Ok(())
+}
+
+/// A short human-readable byte count for the download summary line.
+fn human_size(bytes: u64) -> String {
+    const UNITS: &[&str] = &["B", "kB", "MB", "GB", "TB"];
+    let mut size = bytes as f64;
+    let mut unit = 0;
+    while size >= 1024.0 && unit < UNITS.len() - 1 {
+        size /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} {}", UNITS[0])
+    } else {
+        format!("{size:.2} {}", UNITS[unit])
     }
 }
 

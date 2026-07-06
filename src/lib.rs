@@ -6,6 +6,7 @@
 pub mod cli;
 pub mod config;
 pub mod cookies;
+pub mod download;
 pub mod encoding;
 pub mod errors;
 pub mod help;
