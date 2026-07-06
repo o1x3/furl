@@ -320,6 +320,55 @@ fn body_source_mixing_is_rejected() {
 }
 
 #[test]
+fn compress_content_encoding_follows_cli_headers() {
+    // Content-Encoding lands after the CLI-applied headers, not before.
+    let request = prepared(&["POST", "example.org", "-xx", "X-Foo:bar", "data=x"]);
+    let names: Vec<&str> = request
+        .headers
+        .entries
+        .iter()
+        .map(|(n, _)| n.as_str())
+        .collect();
+    let foo = names.iter().position(|&n| n == "X-Foo").unwrap();
+    let enc = names.iter().position(|&n| n == "Content-Encoding").unwrap();
+    assert!(
+        foo < enc,
+        "X-Foo should precede Content-Encoding: {names:?}"
+    );
+}
+
+#[test]
+fn computed_auth_overrides_raw_authorization_header() {
+    // -a credentials replace a raw Authorization header rather than the
+    // other way around.
+    let request = prepared(&[
+        "GET",
+        "example.org",
+        "-a",
+        "u:p",
+        "Authorization:Bearer raw",
+    ]);
+    let expected = super::basic_authorization("u", "p");
+    assert_eq!(
+        request.headers.get("Authorization"),
+        Some(expected.as_str())
+    );
+    let count = request
+        .headers
+        .entries
+        .iter()
+        .filter(|(n, _)| n.eq_ignore_ascii_case("authorization"))
+        .count();
+    assert_eq!(count, 1, "only the computed Authorization survives");
+}
+
+#[test]
+fn raw_authorization_header_stands_without_computed_auth() {
+    let request = prepared(&["GET", "example.org", "Authorization:Bearer raw"]);
+    assert_eq!(request.headers.get("Authorization"), Some("Bearer raw"));
+}
+
+#[test]
 fn compress_conflicts() {
     let error =
         prepared_with_stdin(&["POST", "example.org", "-x", "--chunked", "a=b"], None).unwrap_err();

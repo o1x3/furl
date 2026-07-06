@@ -7,10 +7,10 @@ fn ok(argv: &[&str]) -> String {
 
 #[track_caller]
 fn err(argv: &[&str]) -> String {
-    dispatch(&argv.iter().map(|a| a.to_string()).collect::<Vec<_>>())
-        .err()
-        .expect("expected error")
-        .render()
+    match dispatch(&argv.iter().map(|a| a.to_string()).collect::<Vec<_>>()) {
+        Ok(output) => panic!("expected an error, got: {output}"),
+        Err(error) => error.render(),
+    }
 }
 
 #[test]

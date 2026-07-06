@@ -108,7 +108,7 @@ impl HeaderSet {
         }
     }
 
-    fn remove(&mut self, name: &str) {
+    pub fn remove(&mut self, name: &str) {
         self.entries.retain(|(n, _)| !n.eq_ignore_ascii_case(name));
     }
 
@@ -180,8 +180,9 @@ pub fn assemble(
         }
     }
 
-    // Credentials computed from --auth/userinfo slot in after the body
-    // headers (an explicit Authorization header stays application-side).
+    // Computed credentials (from `-a`/URL/session) render after the
+    // length, in the auth-layer slot ahead of the application headers. A
+    // raw Authorization header stays application-side.
     if let Some(value) = authorization {
         wire.push(("Authorization".into(), value));
     }

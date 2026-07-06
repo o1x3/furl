@@ -230,21 +230,6 @@ pub fn build(context: &BuildContext<'_>) -> Result<PreparedRequest, BuildError> 
     if let Some(mime) = &file_content_type {
         app_headers.set("Content-Type", mime);
     }
-    // --compress: replace the body with its zlib-compressed form.
-    // Once (`-x`) keeps the original unless compression strictly shrinks
-    // it; twice (`-xx`) forces it. Empty bodies are left alone.
-    let mut built_body = built_body;
-    if args.compress > 0 {
-        if let Some(body) = &mut built_body {
-            if !body.bytes.is_empty() {
-                let compressed = body::zlib_compress(&body.bytes);
-                if args.compress >= 2 || compressed.len() < body.bytes.len() {
-                    body.bytes = compressed;
-                    app_headers.set("Content-Encoding", "deflate");
-                }
-            }
-        }
-    }
 
     // Session headers sit between defaults and CLI headers: a session
     // value overrides a default, and a CLI value overrides the session.
@@ -273,6 +258,23 @@ pub fn build(context: &BuildContext<'_>) -> Result<PreparedRequest, BuildError> 
         app_headers.set("Content-Type", &final_type);
     }
 
+    // --compress: replace the body with its zlib-compressed form, after
+    // the CLI overlay so `Content-Encoding: deflate` lands last among the
+    // application headers. Once (`-x`) keeps the original unless
+    // compression strictly shrinks it; twice (`-xx`) forces it.
+    let mut built_body = built_body;
+    if args.compress > 0 {
+        if let Some(body) = &mut built_body {
+            if !body.bytes.is_empty() {
+                let compressed = body::zlib_compress(&body.bytes);
+                if args.compress >= 2 || compressed.len() < body.bytes.len() {
+                    body.bytes = compressed;
+                    app_headers.set("Content-Encoding", "deflate");
+                }
+            }
+        }
+    }
+
     // -- Method -------------------------------------------------------------
     let method = args
         .method
@@ -282,11 +284,16 @@ pub fn build(context: &BuildContext<'_>) -> Result<PreparedRequest, BuildError> 
 
     // -- Wire headers + auth ---------------------------------------------------
     let body_length = built_body.as_ref().map(|b| b.bytes.len() as u64);
-    // CLI/URL credentials win; the session's authorization applies only
-    // when the invocation carries none.
+    // Resolved credentials from `-a`/URL, else the session's stored auth.
+    // Computed auth is applied by the auth layer and overrides any raw
+    // `Authorization:` header; a raw header stands only when no auth was
+    // resolved.
     let authorization = resolve_authorization(args, userinfo.as_ref())?
-        .or_else(|| context.session_authorization.clone())
-        .filter(|_| !app_headers.contains("Authorization"));
+        .or_else(|| context.session_authorization.clone());
+    if authorization.is_some() {
+        // The computed header replaces any raw Authorization from the CLI.
+        app_headers.remove("Authorization");
+    }
     let wire = headers::assemble(
         &app_headers,
         &method,

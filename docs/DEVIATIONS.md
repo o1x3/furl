@@ -40,6 +40,11 @@ furl corrects a handful of long-standing edge-case behaviors:
   plugin-loading mechanism.
 - **ASCII punctuation in messages.** A few messages that used non-ASCII
   apostrophes now use plain ASCII.
+- **Authorization header wire order.** When credentials are supplied *and* a
+  raw `Authorization:` header is also given (an unusual combination), the
+  computed `Authorization` header may appear in a slightly different position
+  relative to `Content-Length`. Header order does not affect how any server
+  interprets the request; the header values are identical.
 - **Compression output.** `--compress` produces a valid RFC 1950 zlib stream
   and honors the `-x` skip-if-not-smaller / `-xx` force semantics, but the exact
   compressed bytes (and therefore the `Content-Length`) differ from other
