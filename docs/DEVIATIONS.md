@@ -38,6 +38,14 @@ furl corrects a handful of long-standing edge-case behaviors:
 - **No dynamic plugins.** furl is a single compiled binary. Only the built-in
   auth schemes (basic, bearer, digest) are available; there is no runtime
   plugin-loading mechanism.
+- **Encrypted client keys.** `--cert-key-pass` decrypts modern PKCS#8 encrypted
+  private keys (`ENCRYPTED PRIVATE KEY` PEM). Legacy OpenSSL "traditional" keys
+  (`Proc-Type: 4,ENCRYPTED` with `DEK-Info`) are rejected with a hint to
+  re-encrypt via `openssl pkcs8 -topk8`. When the key is encrypted, the flag is
+  absent, *and* `--ignore-stdin` is set, furl errors instead of prompting.
+- **SOCKS proxies.** `--proxy` and the proxy environment variables accept
+  `http://` and `https://` proxies. A `socks…://` proxy is reported as
+  unsupported rather than dialed.
 - **ASCII punctuation in messages.** A few messages that used non-ASCII
   apostrophes now use plain ASCII.
 - **Authorization header wire order.** When credentials are supplied *and* a
@@ -53,21 +61,11 @@ furl corrects a handful of long-standing edge-case behaviors:
 
 ## Partial parity
 
-- **Non-JSON body coloring.** furl colorizes JSON response bodies (byte-exact
-  with the reference across the `auto` and pie styles) but ships only a JSON
-  lexer. Bodies whose type selects a different lexer (HTML, JavaScript, CSS, …)
-  are shown uncolored rather than highlighted with a language-specific scheme.
-  Declining to color is closer to the reference than mis-coloring, but it is not
-  full parity for those content types.
-- **256-color named styles.** The `auto` (8/16-color) and `pie` family
-  (`pie`, `pie-dark`, `pie-light`) styles are byte-exact. Other named 256-color
-  styles (`monokai`, `solarized`, …) are approximated.
-
-## Under construction
-
-These are recognized where applicable but not yet at parity, tracked for a
-future release:
-
-- **`furl-manager sessions upgrade`** (the command reports that it is not yet
-  implemented).
-- **The slow-stdin read warning** and **`SIGINT`/`SIGPIPE`** signal handling.
+- **Cipher-suite names.** `--ciphers` takes the TLS backend's (rustls)
+  cipher-suite names — the IANA or rustls spellings, matched
+  case-insensitively — rather than the legacy OpenSSL cipher-string syntax.
+- **Non-JSON body coloring.** JSON response bodies are colorized byte-exact
+  with the reference across every supported style. Bodies whose content type
+  selects a different lexer (HTML, JavaScript, CSS, XML, …) are shown uncolored
+  rather than highlighted with a language-specific scheme — the same thing the
+  reference does when no lexer matches, but not full parity for those types.
