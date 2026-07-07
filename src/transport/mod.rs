@@ -89,11 +89,12 @@ pub fn send(
     request: &PreparedRequest,
     options: &TransportOptions,
 ) -> Result<RawResponse, TransportError> {
-    let host = request
-        .url
-        .host_str()
-        .expect("URL host validated at build time")
-        .to_string();
+    let host = unbracket(
+        request
+            .url
+            .host_str()
+            .expect("URL host validated at build time"),
+    );
     let port = request
         .url
         .port_or_known_default()
@@ -128,7 +129,8 @@ fn send_via_proxy(
     target_port: u16,
     target_https: bool,
 ) -> Result<RawResponse, TransportError> {
-    let stream = connect(&route.host, route.port, options.timeout)
+    let proxy_host = unbracket(&route.host);
+    let stream = connect(&proxy_host, route.port, options.timeout)
         .map_err(|error| TransportError::Proxy(Box::new(error)))?;
 
     match (target_https, route.https) {
@@ -141,7 +143,7 @@ fn send_via_proxy(
         (false, true) => {
             // TLS to the proxy, absolute-form inside.
             let head = wire_head(request, WireForm::Absolute, route.authorization.as_deref());
-            let mut stream = tls::wrap(stream, &route.host, &options.tls)
+            let mut stream = tls::wrap(stream, &proxy_host, &options.tls)
                 .map_err(|error| TransportError::Proxy(Box::new(error)))?;
             write_request(&mut stream, &head, request)?;
             read_response(&mut stream, request, options)
@@ -157,7 +159,7 @@ fn send_via_proxy(
         (true, true) => {
             // TLS to the proxy, CONNECT inside, then TLS to the target
             // nested through the tunnel.
-            let mut stream = tls::wrap(stream, &route.host, &options.tls)
+            let mut stream = tls::wrap(stream, &proxy_host, &options.tls)
                 .map_err(|error| TransportError::Proxy(Box::new(error)))?;
             tunnel(&mut stream, target_host, target_port, route)?;
             let head = wire_head(request, WireForm::Origin, None);
@@ -232,6 +234,15 @@ const EAI_FAIL: i32 = if cfg!(any(target_os = "macos", target_os = "ios")) {
 } else {
     -4
 };
+
+/// Strip the surrounding brackets from an IPv6 URL host literal; other
+/// hosts pass through. The resolver and TLS layers want the bare address.
+fn unbracket(host: &str) -> String {
+    host.strip_prefix('[')
+        .and_then(|rest| rest.strip_suffix(']'))
+        .unwrap_or(host)
+        .to_string()
+}
 
 fn connect(host: &str, port: u16, timeout: Option<Duration>) -> Result<TcpStream, TransportError> {
     use std::net::ToSocketAddrs;
