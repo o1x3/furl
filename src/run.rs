@@ -6,7 +6,7 @@ use crate::cli::args::ParsedArgs;
 use crate::cli::items::{RequestItems, process_items};
 use crate::cli::parser::{Outcome, UsageError, parse};
 use crate::cookies::Jar;
-use crate::errors::{runtime_error_line, usage_error_block};
+use crate::errors::usage_error_block;
 use crate::output::message::{RequestParts, render_request, render_response_head};
 use crate::request::{BuildContext, BuildError, PreparedRequest, build, split_credentials};
 use crate::status::ExitStatus;
@@ -18,6 +18,7 @@ use crate::{Program, VERSION};
 const PRINT_LETTERS: &str = "HBhbm";
 
 pub fn run(program: Program) -> i32 {
+    install_sigint_handler();
     let cli_argv: Vec<String> = std::env::args().skip(1).collect();
     let program_name = match program {
         Program::Furl => "furl",
@@ -27,6 +28,8 @@ pub fn run(program: Program) -> i32 {
     // Config `default_options` are prepended to the user's argv, so CLI
     // tokens (coming later) win for last-wins options and accumulate for
     // counts and appends. A malformed config file is a warning, not fatal.
+    // It surfaces before parsing, so quiet/style are still at their
+    // defaults — exactly the state the warning renders under.
     let config_dir = crate::config::config_dir();
     let (config, config_warning) = crate::config::load(&config_dir);
     if let Some(warning) = config_warning {
@@ -34,7 +37,13 @@ pub fn run(program: Program) -> i32 {
             crate::config::ConfigWarning::InvalidJson(m)
             | crate::config::ConfigWarning::Unreadable(m) => m,
         };
-        eprintln!("{program_name}: warning: {message}");
+        let reporter = Reporter {
+            program: program_name.to_string(),
+            quiet: 0,
+            stdout_tty: std::io::stdout().is_terminal(),
+            colors: stderr_colors("auto"),
+        };
+        reporter.warning(&message);
     }
     let mut argv = config.default_options;
     argv.extend(cli_argv);
@@ -62,17 +71,110 @@ pub fn run(program: Program) -> i32 {
         }
     };
 
-    match execute(program, program_name, &mut args) {
+    // The interrupt newline follows the stderr-nulling of -q.
+    SIGINT_QUIET.store(args.quiet > 0, std::sync::atomic::Ordering::Relaxed);
+    // Suppression tracks where terminal output lands: --download routes
+    // it to stderr; --output takes it off the terminal entirely.
+    let stdout_tty = if args.download {
+        std::io::stderr().is_terminal()
+    } else {
+        std::io::stdout().is_terminal() && args.output.is_none()
+    };
+    let reporter = Reporter {
+        program: program_name.to_string(),
+        quiet: args.quiet,
+        stdout_tty,
+        colors: stderr_colors(&args.style),
+    };
+
+    match execute(program, program_name, &reporter, &mut args) {
         Ok(status) => status.code(),
-        Err(failure) => report_failure(program_name, failure, args.traceback || args.debug),
+        Err(failure) => report_failure(&reporter, failure),
     }
+}
+
+static SIGINT_QUIET: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// An interrupt exits 130 after a bare newline on stderr (suppressed by
+/// `-q`, which nulls stderr).
+fn install_sigint_handler() {
+    let _ = ctrlc::set_handler(|| {
+        if !SIGINT_QUIET.load(std::sync::atomic::Ordering::Relaxed) {
+            let stderr = std::io::stderr();
+            let _ = stderr.lock().write_all(b"\n");
+        }
+        std::process::exit(ExitStatus::ErrorCtrlC.code());
+    });
+}
+
+/// Renders warnings and errors to stderr with the standard framing,
+/// coloring, and quiet-suppression rules.
+struct Reporter {
+    program: String,
+    quiet: u32,
+    /// False once `--output` redirects stdout.
+    stdout_tty: bool,
+    /// `(error, warning)` SGR parameters when stderr gets colors.
+    colors: Option<(&'static str, &'static str)>,
+}
+
+impl Reporter {
+    fn error(&self, message: &str) {
+        // Errors always show.
+        self.log(crate::errors::LogLevel::Error, message);
+    }
+
+    fn warning(&self, message: &str) {
+        // Warnings disappear at -qq when stdout is a terminal; when piped,
+        // they stay visible at any quiet level.
+        if self.stdout_tty && self.quiet >= 2 {
+            return;
+        }
+        self.log(crate::errors::LogLevel::Warning, message);
+    }
+
+    fn log(&self, level: crate::errors::LogLevel, message: &str) {
+        let color = self.colors.map(|(error, warning)| match level {
+            crate::errors::LogLevel::Error => error,
+            crate::errors::LogLevel::Warning => warning,
+        });
+        let block = crate::errors::log_block(&self.program, level, message, color);
+        // stderr going away must not turn into a panic.
+        let stderr = std::io::stderr();
+        let _ = stderr.lock().write_all(block.as_bytes());
+    }
+}
+
+/// SGR parameters for stderr messages: the pie styles carry their palette
+/// (on 256-color terminals); everything else colors with the standard
+/// red/yellow pair. No terminal, `NO_COLOR`, or a zero-color TERM → none.
+fn stderr_colors(style: &str) -> Option<(&'static str, &'static str)> {
+    if !std::io::stderr().is_terminal() {
+        return None;
+    }
+    if std::env::var_os("NO_COLOR").is_some_and(|value| !value.is_empty()) {
+        return None;
+    }
+    let depth = crate::output::color::detect_color_depth();
+    if !crate::output::color::colors_active(depth) {
+        return None;
+    }
+    let full = depth == crate::output::color::ColorDepth::Ansi256;
+    Some(match style {
+        "pie" if full => ("38;5;167", "38;5;209"),
+        "pie-dark" if full => ("38;5;203", "38;5;215"),
+        "pie-light" if full => ("38;5;166", "38;5;172"),
+        _ => ("31", "33"),
+    })
 }
 
 /// A failure on the way to (or during) the request.
 enum Failure {
     Usage(String),
     Runtime {
-        kind: String,
+        /// The error-kind prefix (`ConnectionError: …`); bare messages
+        /// (timeouts, redirect limits) carry none.
+        kind: Option<String>,
         message: String,
         status: ExitStatus,
     },
@@ -82,34 +184,99 @@ enum Failure {
 impl Failure {
     fn runtime(kind: &str, message: impl Into<String>) -> Failure {
         Failure::Runtime {
-            kind: kind.to_string(),
+            kind: Some(kind.to_string()),
             message: message.into(),
             status: ExitStatus::Error,
         }
     }
+
+    fn bare(message: impl Into<String>, status: ExitStatus) -> Failure {
+        Failure::Runtime {
+            kind: None,
+            message: message.into(),
+            status,
+        }
+    }
 }
 
-fn report_failure(program_name: &str, failure: Failure, _traceback: bool) -> i32 {
+fn report_failure(reporter: &Reporter, failure: Failure) -> i32 {
     match failure {
         Failure::Usage(message) => {
             let error = UsageError {
                 message,
                 option: None,
             };
-            exit_usage(program_name, &error, 1)
+            exit_usage(&reporter.program, &error, 1)
         }
         Failure::Runtime {
             kind,
             message,
             status,
         } => {
-            eprint!("{}", runtime_error_line(program_name, &kind, &message));
+            let rendered = match kind {
+                Some(kind) => format!("{kind}: {message}"),
+                None => message,
+            };
+            reporter.error(&rendered);
             status.code()
         }
         Failure::Annotated(rendered) => {
             eprintln!("{rendered}");
             ExitStatus::Error.code()
         }
+    }
+}
+
+/// Read the piped-stdin body. Online, a watcher thread nudges toward
+/// --ignore-stdin on stderr when no data (not even EOF) shows up within
+/// the warn threshold; the read itself never stops waiting.
+/// `FURL_STDIN_READ_WARN_THRESHOLD` overrides the 10s default; `0`
+/// disables. The nudge is plain stderr text (nulled by -q), not a framed
+/// warning.
+fn read_stdin_body(offline: bool, quiet: bool) -> std::io::Result<Vec<u8>> {
+    let threshold = std::env::var("FURL_STDIN_READ_WARN_THRESHOLD")
+        .ok()
+        .and_then(|value| value.trim().parse::<f64>().ok())
+        .unwrap_or(10.0);
+
+    let watch = !offline && threshold > 0.0 && threshold.is_finite();
+    let seen_data = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    if watch {
+        let seen_data = std::sync::Arc::clone(&seen_data);
+        let wait = std::time::Duration::from_secs_f64(threshold);
+        std::thread::spawn(move || {
+            std::thread::sleep(wait);
+            if seen_data.load(std::sync::atomic::Ordering::Relaxed) || quiet {
+                return;
+            }
+            let seconds = crate::json::dumps(
+                &crate::json::Value::from(threshold),
+                &crate::json::DumpOptions::default(),
+            );
+            let text = format!(
+                "> warning: no stdin data read in {seconds}s \
+                 (perhaps you want to --ignore-stdin)\n\
+                 > See: {}\n",
+                crate::errors::DOCS_URL
+            );
+            let stderr = std::io::stderr();
+            let _ = stderr.lock().write_all(text.as_bytes());
+        });
+    }
+
+    let stdin = std::io::stdin();
+    let mut handle = stdin.lock();
+    let mut bytes = Vec::new();
+    let mut chunk = [0u8; 65536];
+    loop {
+        let read = handle.read(&mut chunk)?;
+        // The first read result — even an immediate EOF — counts as the
+        // pipe answering.
+        seen_data.store(true, std::sync::atomic::Ordering::Relaxed);
+        if read == 0 {
+            return Ok(bytes);
+        }
+        bytes.extend_from_slice(&chunk[..read]);
     }
 }
 
@@ -125,6 +292,7 @@ fn exit_usage(program_name: &str, error: &UsageError, code: i32) -> i32 {
 fn execute(
     program: Program,
     program_name: &str,
+    reporter: &Reporter,
     args: &mut ParsedArgs,
 ) -> Result<ExitStatus, Failure> {
     // -- Post-parse pipeline -------------------------------------------
@@ -226,9 +394,7 @@ fn execute(
     // conflicts with --raw and data items surface, and an empty piped
     // body still triggers data-driven defaults.
     let stdin_body = if stdin_available {
-        let mut bytes = Vec::new();
-        std::io::stdin()
-            .read_to_end(&mut bytes)
+        let bytes = read_stdin_body(args.offline, args.quiet > 0)
             .map_err(|error| Failure::runtime("IOError", error.to_string()))?;
         Some(bytes)
     } else {
@@ -237,7 +403,7 @@ fn execute(
 
     // -- Session load -----------------------------------------------------------
     let scheme = default_scheme(program, args);
-    let mut session_state = SessionState::open(program_name, args, &items, scheme)?;
+    let mut session_state = SessionState::open(reporter, args, &items, scheme)?;
     let session_headers = session_state
         .as_ref()
         .map(|s| s.session.headers().to_vec())
@@ -331,19 +497,38 @@ fn execute(
         }
         let stdout = std::io::stdout();
         let mut handle = stdout.lock();
-        handle.write_all(&rendered).ok();
-        if handle.is_terminal() && !rendered.is_empty() {
-            handle.write_all(b"\n\n").ok();
+        let mut sink_error = handle.write_all(&rendered).err();
+        if sink_error.is_none() && handle.is_terminal() && !rendered.is_empty() {
+            sink_error = handle.write_all(b"\n\n").err();
         }
-        handle.flush().ok();
+        if sink_error.is_none() {
+            sink_error = handle.flush().err();
+        }
+        drop(handle);
         // Offline runs still persist request headers and auth (no cookies).
         if let Some(state) = &mut session_state {
-            state.save(&request, &items, args, None);
+            state.save(&request, &items, args, None)?;
+        }
+        if let Some(error) = sink_error {
+            if args.traceback && error.kind() == std::io::ErrorKind::BrokenPipe {
+                // A broken pipe under --traceback degrades to a bare
+                // stderr newline and a clean exit.
+                if args.quiet == 0 {
+                    let stderr = std::io::stderr();
+                    let _ = stderr.lock().write_all(b"\n");
+                }
+            } else {
+                let (errno, text) = crate::errors::os_error_parts(&error);
+                return Err(Failure::runtime(
+                    crate::errors::os_error_class(error.kind()),
+                    format!("[Errno {errno}] {text}"),
+                ));
+            }
         }
         return Ok(ExitStatus::Success);
     }
 
-    execute_online(args, request, format, &items, session_state)
+    execute_online(args, reporter, request, format, &items, session_state)
 }
 
 const BINARY_NOTICE: &[u8] = b"+-----------------------------------------+\n\
@@ -380,23 +565,48 @@ struct Emitter {
     /// separator even in tty mode.
     force_separator: bool,
     started: bool,
+    /// The first sink error's (errno, kind); once set, writes stop and
+    /// the online loop turns it into the exit.
+    failed: Option<(i32, std::io::ErrorKind)>,
+    /// --traceback swallows broken pipes (a bare stderr newline per
+    /// message instead of an error exit).
+    traceback: bool,
+    /// -q nulls stderr, taking the swallowed-pipe newline with it.
+    quiet: bool,
 }
 
 impl Emitter {
     fn write(&mut self, bytes: &[u8]) {
-        match &mut self.sink {
+        if self.failed.is_some() {
+            return;
+        }
+        let result = match &mut self.sink {
             Sink::Stdout => {
                 let stdout = std::io::stdout();
-                stdout.lock().write_all(bytes).ok();
+                let mut handle = stdout.lock();
+                handle.write_all(bytes)
             }
             Sink::Stderr => {
                 let stderr = std::io::stderr();
-                stderr.lock().write_all(bytes).ok();
+                let mut handle = stderr.lock();
+                handle.write_all(bytes)
             }
-            Sink::File(file) => {
-                file.write_all(bytes).ok();
-            }
-            Sink::Null => {}
+            Sink::File(file) => file.write_all(bytes),
+            Sink::Null => Ok(()),
+        };
+        if let Err(error) = result {
+            let (errno, _) = crate::errors::os_error_parts(&error);
+            self.failed = Some((errno, error.kind()));
+        }
+    }
+
+    /// Under --traceback a broken pipe degrades to one bare stderr newline
+    /// per message that still tries to print.
+    fn swallowed_pipe_newline(&self) {
+        let broken_pipe = matches!(self.failed, Some((_, std::io::ErrorKind::BrokenPipe)));
+        if broken_pipe && self.traceback && !self.quiet {
+            let stderr = std::io::stderr();
+            let _ = stderr.lock().write_all(b"\n");
         }
     }
 
@@ -448,21 +658,36 @@ impl Emitter {
         // when the body was empty.
         self.previous_had_body = message.body.is_some();
         self.started = true;
+        self.swallowed_pipe_newline();
     }
 
     fn finish(&mut self) {
-        match &mut self.sink {
-            Sink::Stdout => {
-                std::io::stdout().flush().ok();
+        let result = match &mut self.sink {
+            Sink::Stdout => std::io::stdout().flush(),
+            Sink::Stderr => std::io::stderr().flush(),
+            Sink::File(file) => file.flush(),
+            Sink::Null => Ok(()),
+        };
+        if let Err(error) = result {
+            if self.failed.is_none() {
+                let (errno, _) = crate::errors::os_error_parts(&error);
+                self.failed = Some((errno, error.kind()));
+                self.swallowed_pipe_newline();
             }
-            Sink::Stderr => {
-                std::io::stderr().flush().ok();
-            }
-            Sink::File(file) => {
-                file.flush().ok();
-            }
-            Sink::Null => {}
         }
+    }
+
+    /// The failure this sink ends the run with, unless --traceback
+    /// swallowed a broken pipe.
+    fn failure(&self) -> Option<Failure> {
+        let (errno, kind) = self.failed?;
+        if self.traceback && kind == std::io::ErrorKind::BrokenPipe {
+            return None;
+        }
+        Some(Failure::runtime(
+            crate::errors::os_error_class(kind),
+            format!("[Errno {errno}] {}", crate::errors::os_error_text(errno)),
+        ))
     }
 }
 
@@ -502,25 +727,86 @@ fn resolve_tls(args: &ParsedArgs) -> tls::TlsOptions {
     }
 }
 
-fn transport_failure(error: TransportError, timeout: f64) -> Failure {
+fn transport_failure(error: TransportError, timeout: f64, request: &PreparedRequest) -> Failure {
+    // Connection-level failures carry the request they interrupted.
+    let suffix = format!(
+        " while doing a {} request to URL: {}",
+        request.method,
+        request.url.as_str()
+    );
+    // Pool naming: effective port, bare IPv6 host (no brackets).
+    let host = request.url.host_str().unwrap_or_default();
+    let host = host
+        .strip_prefix('[')
+        .map_or(host, |rest| rest.strip_suffix(']').unwrap_or(rest));
+    let port = request.url.port_or_known_default().unwrap_or(0);
+    let https = request.url.scheme() == "https";
+    let (pool, connection) = if https {
+        ("HTTPSConnectionPool", "HTTPSConnection")
+    } else {
+        ("HTTPConnectionPool", "HTTPConnection")
+    };
+
     match error {
-        TransportError::Timeout => Failure::Runtime {
-            kind: "".to_string(),
-            message: format!(
+        TransportError::Timeout => Failure::bare(
+            format!(
                 "Request timed out ({}s).",
                 crate::json::dumps(
                     &crate::json::Value::from(timeout),
                     &crate::json::DumpOptions::default()
                 )
             ),
-            status: ExitStatus::ErrorTimeout,
-        },
-        TransportError::Connection(message) => Failure::runtime("ConnectionError", message),
-        TransportError::Tls(message) => Failure::runtime("SSLError", message),
-        TransportError::Protocol(message) => Failure::runtime("ConnectionError", message),
-        TransportError::TooManyHeaders(count) => {
-            Failure::runtime("ConnectionError", format!("got more than {count} headers"))
+            ExitStatus::ErrorTimeout,
+        ),
+        TransportError::Dns { code, text } => {
+            let annotation = if code == transport::EAI_NONAME {
+                "\nCouldn't resolve the given hostname. Please check the URL and try again."
+            } else if code == transport::EAI_AGAIN {
+                "\nCouldn't connect to a DNS server. Please check your connection and try again."
+            } else {
+                ""
+            };
+            Failure::runtime("gaierror", format!("[Errno {code}] {text}{annotation}"))
         }
+        TransportError::ConnectFailed { errno, text } => {
+            let inner = format!(
+                "{connection}(host='{host}', port={port}): \
+                 Failed to establish a new connection: [Errno {errno}] {text}"
+            );
+            Failure::runtime(
+                "ConnectionError",
+                format!(
+                    "{pool}(host='{host}', port={port}): Max retries exceeded with url: {target} \
+                     (Caused by NewConnectionError(\"{inner}\")){suffix}",
+                    target = request.request_target()
+                ),
+            )
+        }
+        TransportError::ClosedWithoutResponse => Failure::runtime(
+            "ConnectionError",
+            format!(
+                "('Connection aborted.', \
+                 RemoteDisconnected('Remote end closed connection without response')){suffix}"
+            ),
+        ),
+        TransportError::Aborted { errno, kind, text } => Failure::runtime(
+            "ConnectionError",
+            format!(
+                "('Connection aborted.', {class}({errno}, '{text}')){suffix}",
+                class = crate::errors::os_error_class(kind)
+            ),
+        ),
+        TransportError::Connection(message) => {
+            Failure::runtime("ConnectionError", format!("{message}{suffix}"))
+        }
+        TransportError::Tls(message) => Failure::runtime("SSLError", format!("{message}{suffix}")),
+        TransportError::Protocol(message) => {
+            Failure::runtime("ConnectionError", format!("{message}{suffix}"))
+        }
+        TransportError::TooManyHeaders(count) => Failure::runtime(
+            "ConnectionError",
+            format!("got more than {count} headers{suffix}"),
+        ),
     }
 }
 
@@ -693,6 +979,7 @@ impl FormatContext {
 
 fn execute_online(
     args: &ParsedArgs,
+    reporter: &Reporter,
     request: PreparedRequest,
     format: FormatContext,
     items: &RequestItems,
@@ -741,6 +1028,9 @@ fn execute_online(
         previous_had_body: false,
         force_separator: false,
         started: false,
+        failed: None,
+        traceback: args.traceback,
+        quiet: args.quiet > 0,
     };
 
     let mut jar = Jar::new();
@@ -791,8 +1081,8 @@ fn execute_online(
     let mut hops: i64 = 0;
     loop {
         let started_at = std::time::Instant::now();
-        let response =
-            transport::send(&current, &options).map_err(|e| transport_failure(e, args.timeout))?;
+        let response = transport::send(&current, &options)
+            .map_err(|e| transport_failure(e, args.timeout, &current))?;
         let elapsed = started_at.elapsed();
 
         let host = current.url.host_str().unwrap_or_default().to_string();
@@ -828,14 +1118,13 @@ fn execute_online(
         let over_limit = wants_redirect && args.max_redirects > 0 && hops >= args.max_redirects;
         if over_limit {
             emitter.finish();
-            return Err(Failure::Runtime {
-                kind: "TooManyRedirects".to_string(),
-                message: format!(
+            return Err(Failure::bare(
+                format!(
                     "Too many redirects (--max-redirects={}).",
                     args.max_redirects
                 ),
-                status: ExitStatus::ErrorTooManyRedirects,
-            });
+                ExitStatus::ErrorTooManyRedirects,
+            ));
         }
         let is_final = !wants_redirect && !wants_digest;
 
@@ -901,22 +1190,27 @@ fn execute_online(
             let mut exit = ExitStatus::Success;
             if args.check_status || args.download {
                 exit = ExitStatus::from_http_status(response.status, follow);
-                if exit != ExitStatus::Success {
-                    let suppress = tty && args.quiet >= 2;
-                    if !suppress {
-                        eprint!(
-                            "\nfurl: warning: HTTP {} {}\n\n",
-                            response.status, response.reason
-                        );
-                    }
+                // On a terminal the colored status line already shows the
+                // failure; the warning only appears piped — or at exactly
+                // -q, where that line was silenced.
+                if exit != ExitStatus::Success && (!reporter.stdout_tty || args.quiet == 1) {
+                    reporter.warning(&format!("HTTP {} {}", response.status, response.reason));
                 }
+            }
+            // A dead sink ends the run (cookies still persist) — unless
+            // --traceback swallowed a broken pipe.
+            if let Some(failure) = emitter.failure() {
+                if let Some(state) = &mut session_state {
+                    state.save(&current, items, args, Some(&jar))?;
+                }
+                return Err(failure);
             }
             // The body only downloads on a success status.
             if args.download && exit == ExitStatus::Success {
                 write_download(args, &current, &download_url, &response, resume_offset)?;
             }
             if let Some(state) = &mut session_state {
-                state.save(&current, items, args, Some(&jar));
+                state.save(&current, items, args, Some(&jar))?;
             }
             return Ok(exit);
         }
@@ -1077,7 +1371,7 @@ impl SessionState {
     /// Resolve and load the session named by the CLI, if any. A missing
     /// file loads an empty session; a corrupt file is fatal.
     fn open(
-        program_name: &str,
+        reporter: &Reporter,
         args: &ParsedArgs,
         items: &RequestItems,
         scheme: &str,
@@ -1118,7 +1412,7 @@ impl SessionState {
             crate::session::port_stripped_host(&bound).to_string()
         };
         if let Some(warning) = session.legacy_warning(&session_id, &bound, !has_separator) {
-            eprintln!("{program_name}: warning: {warning}");
+            reporter.warning(&warning);
         }
 
         Ok(Some(SessionState {
@@ -1136,9 +1430,9 @@ impl SessionState {
         items: &RequestItems,
         args: &ParsedArgs,
         jar: Option<&Jar>,
-    ) {
+    ) -> Result<(), Failure> {
         if !crate::session::should_save(self.read_only, self.existed_before) {
-            return;
+            return Ok(());
         }
         let unset: Vec<String> = items
             .headers
@@ -1157,8 +1451,15 @@ impl SessionState {
             self.session.set_auth(auth);
         }
         if let Err(error) = self.session.save(&self.path) {
-            eprintln!("furl: warning: could not save session: {error}");
+            // A session that cannot persist ends the run the way any
+            // other file error does, with the failing path named.
+            let (errno, text) = crate::errors::os_error_parts(&error);
+            return Err(Failure::runtime(
+                crate::errors::os_error_class(error.kind()),
+                format!("[Errno {errno}] {text}: '{}'", self.path.display()),
+            ));
         }
+        Ok(())
     }
 }
 

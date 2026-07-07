@@ -43,7 +43,21 @@ impl RawResponse {
 
 #[derive(Debug)]
 pub enum TransportError {
-    /// DNS, connect, read/write problems → `ConnectionError`.
+    /// Name resolution failed: the `getaddrinfo` code and its
+    /// `gai_strerror` text.
+    Dns { code: i32, text: String },
+    /// Every TCP connect attempt failed: the last OS errno and its
+    /// `strerror` text.
+    ConnectFailed { errno: i32, text: String },
+    /// The server closed the connection before sending any response bytes.
+    ClosedWithoutResponse,
+    /// An OS error tore the connection down mid-exchange.
+    Aborted {
+        errno: i32,
+        kind: std::io::ErrorKind,
+        text: String,
+    },
+    /// Connection-level problems with no OS errno behind them.
     Connection(String),
     /// The configured timeout elapsed.
     Timeout,
@@ -94,11 +108,30 @@ pub fn send(
     }
 }
 
+/// `getaddrinfo` failure codes as the platform defines them.
+pub const EAI_NONAME: i32 = if cfg!(any(target_os = "macos", target_os = "ios")) {
+    8
+} else {
+    -2
+};
+pub const EAI_AGAIN: i32 = if cfg!(any(target_os = "macos", target_os = "ios")) {
+    2
+} else {
+    -3
+};
+/// Non-recoverable resolver failure: the fallback code for texts the
+/// mapping below does not recognize.
+const EAI_FAIL: i32 = if cfg!(any(target_os = "macos", target_os = "ios")) {
+    4
+} else {
+    -4
+};
+
 fn connect(host: &str, port: u16, timeout: Option<Duration>) -> Result<TcpStream, TransportError> {
     use std::net::ToSocketAddrs;
     let addresses = (host, port)
         .to_socket_addrs()
-        .map_err(|error| TransportError::Connection(dns_error_message(host, &error)))?;
+        .map_err(|error| dns_failure(&error))?;
     let mut last_error = None;
     for address in addresses {
         let attempt = match timeout {
@@ -118,13 +151,46 @@ fn connect(host: &str, port: u16, timeout: Option<Duration>) -> Result<TcpStream
     }
     Err(match last_error {
         Some(error) if error.kind() == std::io::ErrorKind::TimedOut => TransportError::Timeout,
-        Some(error) => TransportError::Connection(error.to_string()),
-        None => TransportError::Connection(format!("no addresses found for {host}")),
+        Some(error) => match error.raw_os_error() {
+            Some(errno) => TransportError::ConnectFailed {
+                errno,
+                text: crate::errors::os_error_text(errno),
+            },
+            None => TransportError::Connection(error.to_string()),
+        },
+        // Resolution succeeded with zero usable addresses: report it the
+        // way a name-not-known failure reports.
+        None => TransportError::Dns {
+            code: EAI_NONAME,
+            text: "no addresses found".to_string(),
+        },
     })
 }
 
-fn dns_error_message(host: &str, error: &std::io::Error) -> String {
-    format!("Couldn't resolve the given hostname: {host} ({error})")
+/// Classify a resolution failure. The standard library renders resolver
+/// errors as `failed to lookup address information: {gai_strerror text}`;
+/// the text keys the platform's EAI code (user-visible in the message).
+fn dns_failure(error: &std::io::Error) -> TransportError {
+    let rendered = error.to_string();
+    let text = rendered
+        .rsplit_once("failed to lookup address information: ")
+        .map(|(_, tail)| tail)
+        .unwrap_or(&rendered)
+        .to_string();
+    let code = match text.as_str() {
+        // macOS and glibc spellings of not-known / try-again.
+        "nodename nor servname provided, or not known" | "Name or service not known" => EAI_NONAME,
+        "Temporary failure in name resolution" => EAI_AGAIN,
+        "No address associated with nodename" | "No address associated with hostname" => {
+            if cfg!(any(target_os = "macos", target_os = "ios")) {
+                7
+            } else {
+                -5
+            }
+        }
+        _ => EAI_FAIL,
+    };
+    TransportError::Dns { code, text }
 }
 
 /// The wire head: request line, then Host, then the prepared headers.
@@ -163,35 +229,43 @@ fn write_request<S: Write>(
     head: &[u8],
     request: &PreparedRequest,
 ) -> Result<(), TransportError> {
-    stream.write_all(head).map_err(write_error)?;
+    stream.write_all(head).map_err(stream_error)?;
     if let Some(body) = &request.body {
         if request.chunked {
             // The whole body as one chunk plus the terminator.
             if !body.bytes.is_empty() {
                 stream
                     .write_all(format!("{:x}\r\n", body.bytes.len()).as_bytes())
-                    .map_err(write_error)?;
-                stream.write_all(&body.bytes).map_err(write_error)?;
-                stream.write_all(b"\r\n").map_err(write_error)?;
+                    .map_err(stream_error)?;
+                stream.write_all(&body.bytes).map_err(stream_error)?;
+                stream.write_all(b"\r\n").map_err(stream_error)?;
             }
-            stream.write_all(b"0\r\n\r\n").map_err(write_error)?;
+            stream.write_all(b"0\r\n\r\n").map_err(stream_error)?;
         } else {
-            stream.write_all(&body.bytes).map_err(write_error)?;
+            stream.write_all(&body.bytes).map_err(stream_error)?;
         }
     } else if request.chunked {
-        stream.write_all(b"0\r\n\r\n").map_err(write_error)?;
+        stream.write_all(b"0\r\n\r\n").map_err(stream_error)?;
     }
-    stream.flush().map_err(write_error)?;
+    stream.flush().map_err(stream_error)?;
     Ok(())
 }
 
-fn write_error(error: std::io::Error) -> TransportError {
+/// Read/write errors mid-exchange: timeouts stay timeouts; OS errors keep
+/// their errno for the rendered message; the rest keep their text.
+fn stream_error(error: std::io::Error) -> TransportError {
     if error.kind() == std::io::ErrorKind::TimedOut
         || error.kind() == std::io::ErrorKind::WouldBlock
     {
-        TransportError::Timeout
-    } else {
-        TransportError::Connection(error.to_string())
+        return TransportError::Timeout;
+    }
+    match error.raw_os_error() {
+        Some(errno) => TransportError::Aborted {
+            errno,
+            kind: error.kind(),
+            text: crate::errors::os_error_text(errno),
+        },
+        None => TransportError::Connection(error.to_string()),
     }
 }
 
@@ -222,9 +296,7 @@ fn read_head<R: BufRead>(reader: &mut R) -> Result<Vec<u8>, TransportError> {
         let mut line = Vec::new();
         read_line(reader, &mut line)?;
         if line.is_empty() {
-            return Err(TransportError::Connection(
-                "Remote end closed connection without response".to_string(),
-            ));
+            return Err(TransportError::ClosedWithoutResponse);
         }
         head.extend_from_slice(&line);
         if head.len() > MAX_HEAD_BYTES {
@@ -242,15 +314,7 @@ fn read_head<R: BufRead>(reader: &mut R) -> Result<Vec<u8>, TransportError> {
 }
 
 fn read_line<R: BufRead>(reader: &mut R, out: &mut Vec<u8>) -> Result<(), TransportError> {
-    reader.read_until(b'\n', out).map_err(|error| {
-        if error.kind() == std::io::ErrorKind::TimedOut
-            || error.kind() == std::io::ErrorKind::WouldBlock
-        {
-            TransportError::Timeout
-        } else {
-            TransportError::Connection(error.to_string())
-        }
-    })?;
+    reader.read_until(b'\n', out).map_err(stream_error)?;
     Ok(())
 }
 
@@ -320,7 +384,7 @@ fn read_body<R: BufRead>(
                 return Ok(());
             }
             let mut chunk = vec![0u8; size];
-            reader.read_exact(&mut chunk).map_err(read_error)?;
+            reader.read_exact(&mut chunk).map_err(stream_error)?;
             response.body.extend_from_slice(&chunk);
             let mut separator = Vec::new();
             read_line(reader, &mut separator)?;
@@ -332,23 +396,15 @@ fn read_body<R: BufRead>(
             .parse()
             .map_err(|_| TransportError::Protocol("invalid Content-Length".into()))?;
         let mut body = vec![0u8; length];
-        reader.read_exact(&mut body).map_err(read_error)?;
+        reader.read_exact(&mut body).map_err(stream_error)?;
         response.body = body;
         return Ok(());
     }
     // No framing: the body runs to connection close.
-    reader.read_to_end(&mut response.body).map_err(read_error)?;
+    reader
+        .read_to_end(&mut response.body)
+        .map_err(stream_error)?;
     Ok(())
-}
-
-fn read_error(error: std::io::Error) -> TransportError {
-    if error.kind() == std::io::ErrorKind::TimedOut
-        || error.kind() == std::io::ErrorKind::WouldBlock
-    {
-        TransportError::Timeout
-    } else {
-        TransportError::Connection(error.to_string())
-    }
 }
 
 /// Content-decode the body for display per `Content-Encoding`.
