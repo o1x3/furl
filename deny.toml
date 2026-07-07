@@ -31,6 +31,9 @@ allow = [
     "Unicode-3.0",
     "MPL-2.0",
     "Zlib",
+    # The Mozilla root-certificate data bundled by webpki-root-certs (via
+    # rustls-platform-verifier) ships under the Community Data License.
+    "CDLA-Permissive-2.0",
 ]
 # Require a fairly high confidence before accepting a detected license.
 confidence-threshold = 0.8
