@@ -215,3 +215,253 @@ fn max_headers_is_enforced() {
         Err(super::TransportError::TooManyHeaders(n)) if n > 10
     ));
 }
+
+// ---------------------------------------------------------------------------
+// TLS: cipher restriction and client-certificate keys against a local
+// TLS server built from the fixtures in `tls::fixtures`.
+// ---------------------------------------------------------------------------
+
+use super::tls::fixtures;
+
+/// TLS fixture material written to disk for the path-based options.
+struct TlsFiles {
+    // Held for its Drop: deletes the directory with the tests' key material.
+    _dir: tempfile::TempDir,
+    ca: std::path::PathBuf,
+    client_cert: std::path::PathBuf,
+    client_key_encrypted: std::path::PathBuf,
+}
+
+fn write_tls_files() -> TlsFiles {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let write = |name: &str, content: &str| {
+        let path = dir.path().join(name);
+        std::fs::write(&path, content).expect("write fixture");
+        path
+    };
+    TlsFiles {
+        ca: write("ca.pem", fixtures::SERVER_CERT),
+        client_cert: write("client.crt", fixtures::CLIENT_CERT),
+        client_key_encrypted: write("client-enc.key", fixtures::CLIENT_KEY_ENCRYPTED),
+        _dir: dir,
+    }
+}
+
+/// One HTTPS exchange against a local TLS server. The 200 response body
+/// carries the negotiated cipher-suite name so tests can assert on it.
+fn tls_exchange(
+    tls: super::tls::TlsOptions,
+    require_client_cert: bool,
+) -> Result<super::RawResponse, super::TransportError> {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind test listener");
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || serve_tls_once(&listener, require_client_cert));
+
+    let argv = vec!["GET".to_string(), format!("127.0.0.1:{port}")];
+    let Ok(Outcome::Args(args)) = parse(&argv) else {
+        panic!("test argv must parse");
+    };
+    let items = process_items(&[], None).expect("items");
+    let request = build(&BuildContext {
+        args: &args,
+        items: &items,
+        stdin_body: None,
+        default_scheme: "https",
+        session_headers: &[],
+        session_authorization: None,
+        netrc_authorization: None,
+        version: "0.1.0",
+    })
+    .expect("build");
+    send(
+        &request,
+        &TransportOptions {
+            timeout: Some(std::time::Duration::from_secs(5)),
+            tls,
+            max_headers: 0,
+            proxy: None,
+        },
+    )
+}
+
+/// Accept one connection, answer one request, report the negotiated
+/// suite. Handshake failures just end the exchange: the client side's
+/// error is what the tests assert on.
+fn serve_tls_once(listener: &TcpListener, require_client_cert: bool) {
+    use rustls_pki_types::pem::PemObject;
+    let certs = vec![
+        rustls_pki_types::CertificateDer::from_pem_slice(fixtures::SERVER_CERT.as_bytes())
+            .expect("server cert"),
+    ];
+    let key = rustls_pki_types::PrivateKeyDer::from_pem_slice(fixtures::SERVER_KEY.as_bytes())
+        .expect("server key");
+    let builder = rustls::ServerConfig::builder();
+    let config = if require_client_cert {
+        builder.with_client_cert_verifier(std::sync::Arc::new(AnyClientCert))
+    } else {
+        builder.with_no_client_auth()
+    }
+    .with_single_cert(certs, key)
+    .expect("server config");
+
+    let Ok((tcp, _)) = listener.accept() else {
+        return;
+    };
+    tcp.set_read_timeout(Some(std::time::Duration::from_secs(5)))
+        .ok();
+    let Ok(connection) = rustls::ServerConnection::new(std::sync::Arc::new(config)) else {
+        return;
+    };
+    let mut tls = rustls::StreamOwned::new(connection, tcp);
+    // Read the request head; a handshake error surfaces here.
+    let mut received = Vec::new();
+    let mut chunk = [0u8; 4096];
+    loop {
+        match tls.read(&mut chunk) {
+            Ok(0) => return,
+            Ok(n) => {
+                received.extend_from_slice(&chunk[..n]);
+                if received.windows(4).any(|w| w == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            Err(_) => return,
+        }
+    }
+    let suite = tls
+        .conn
+        .negotiated_cipher_suite()
+        .and_then(|suite| suite.suite().as_str())
+        .unwrap_or("unknown");
+    let response = format!(
+        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{suite}",
+        suite.len()
+    );
+    let _ = tls.write_all(response.as_bytes());
+    let _ = tls.flush();
+}
+
+/// Test-only client-cert verifier: any presented certificate passes,
+/// but one must be presented (client auth stays mandatory).
+#[derive(Debug)]
+struct AnyClientCert;
+
+impl rustls::server::danger::ClientCertVerifier for AnyClientCert {
+    fn root_hint_subjects(&self) -> &[rustls::DistinguishedName] {
+        &[]
+    }
+
+    fn verify_client_cert(
+        &self,
+        _end_entity: &rustls_pki_types::CertificateDer<'_>,
+        _intermediates: &[rustls_pki_types::CertificateDer<'_>],
+        _now: rustls_pki_types::UnixTime,
+    ) -> Result<rustls::server::danger::ClientCertVerified, rustls::Error> {
+        Ok(rustls::server::danger::ClientCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &rustls_pki_types::CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        _message: &[u8],
+        _cert: &rustls_pki_types::CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        rustls::crypto::aws_lc_rs::default_provider()
+            .signature_verification_algorithms
+            .supported_schemes()
+    }
+}
+
+#[test]
+fn tls_exchange_works_with_a_custom_ca() {
+    let files = write_tls_files();
+    let options = super::tls::TlsOptions {
+        verify: super::tls::Verification::CaBundle(files.ca.clone()),
+        ..Default::default()
+    };
+    let response = tls_exchange(options, false).expect("TLS roundtrip");
+    assert_eq!(response.status, 200);
+    assert!(!response.body.is_empty());
+}
+
+#[test]
+fn ciphers_restrict_the_negotiated_suite() {
+    let files = write_tls_files();
+    // The IANA name, exercising the prefix-insensitive match.
+    let options = super::tls::TlsOptions {
+        verify: super::tls::Verification::CaBundle(files.ca.clone()),
+        ciphers: Some("TLS_AES_256_GCM_SHA384".to_string()),
+        ..Default::default()
+    };
+    let response = tls_exchange(options, false).expect("TLS roundtrip");
+    assert_eq!(response.body, b"TLS13_AES_256_GCM_SHA384");
+
+    // A TLS 1.2 ECDSA suite, exact rustls name.
+    let options = super::tls::TlsOptions {
+        verify: super::tls::Verification::CaBundle(files.ca.clone()),
+        ciphers: Some("TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256".to_string()),
+        ..Default::default()
+    };
+    let response = tls_exchange(options, false).expect("TLS roundtrip");
+    assert_eq!(response.body, b"TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256");
+}
+
+#[test]
+fn unmatched_ciphers_fail_the_request_as_a_tls_error() {
+    let files = write_tls_files();
+    let options = super::tls::TlsOptions {
+        verify: super::tls::Verification::CaBundle(files.ca.clone()),
+        ciphers: Some("BOGUS".to_string()),
+        ..Default::default()
+    };
+    let error = tls_exchange(options, false).unwrap_err();
+    let super::TransportError::Tls(message) = error else {
+        panic!("expected a TLS error");
+    };
+    assert!(message.contains("no cipher can be selected"), "{message}");
+    assert!(message.contains("BOGUS"), "{message}");
+}
+
+#[test]
+fn client_cert_with_encrypted_key_authenticates() {
+    let files = write_tls_files();
+    let options = super::tls::TlsOptions {
+        verify: super::tls::Verification::CaBundle(files.ca.clone()),
+        client_cert: Some(files.client_cert.clone()),
+        client_key: Some(files.client_key_encrypted.clone()),
+        cert_key_pass: Some(fixtures::CLIENT_KEY_PASSPHRASE.to_string()),
+        ..Default::default()
+    };
+    let response = tls_exchange(options, true).expect("mutual TLS roundtrip");
+    assert_eq!(response.status, 200);
+}
+
+#[test]
+fn wrong_key_passphrase_fails_before_the_handshake() {
+    let files = write_tls_files();
+    let options = super::tls::TlsOptions {
+        verify: super::tls::Verification::CaBundle(files.ca.clone()),
+        client_cert: Some(files.client_cert.clone()),
+        client_key: Some(files.client_key_encrypted.clone()),
+        cert_key_pass: Some("not-the-passphrase".to_string()),
+        ..Default::default()
+    };
+    let error = tls_exchange(options, true).unwrap_err();
+    let super::TransportError::Tls(message) = error else {
+        panic!("expected a TLS error");
+    };
+    assert!(message.contains("could not decrypt"), "{message}");
+}
