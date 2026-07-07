@@ -46,6 +46,17 @@ furl corrects a handful of long-standing edge-case behaviors:
 - **SOCKS proxies.** `--proxy` and the proxy environment variables accept
   `http://` and `https://` proxies. A `socks…://` proxy is reported as
   unsupported rather than dialed.
+- **Passwords are never read from a non-terminal stdin.** When `-a user` is
+  given without a password, furl prompts on the terminal. If there is no
+  terminal (stdin is a pipe), furl does not consume the piped data as the
+  password — the reference reads it via a `getpass` fallback. Declining avoids
+  silently turning the intended request body into a password.
+- **Invalid hostname characters.** A hostname containing characters that are not
+  valid in a domain name (for example a literal space) is rejected as an invalid
+  URL rather than percent-encoded into the `Host` header.
+- **Download extension guessing.** When a download filename needs an extension,
+  furl derives it from its own MIME-type table, which can differ from the
+  reference's for uncommon or ambiguous content types.
 - **ASCII punctuation in messages.** A few messages that used non-ASCII
   apostrophes now use plain ASCII.
 - **Authorization header wire order.** When credentials are supplied *and* a
@@ -69,3 +80,8 @@ furl corrects a handful of long-standing edge-case behaviors:
   selects a different lexer (HTML, JavaScript, CSS, XML, …) are shown uncolored
   rather than highlighted with a language-specific scheme — the same thing the
   reference does when no lexer matches, but not full parity for those types.
+- **`--stream` delivery.** With `--stream`, the output bytes are byte-identical
+  to the reference (each line runs through the format/color pipeline
+  independently), but the response is read fully before it is written rather than
+  flushed line-by-line as it arrives. For a long-lived streaming response the
+  final bytes match; the incremental timing does not.
