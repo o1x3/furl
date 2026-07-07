@@ -259,9 +259,10 @@ fn userinfo_becomes_basic_auth_and_leaves_host() {
         Some("Basic dXNlcjpwdw==")
     );
     assert_eq!(request.host_netloc, "example.org:8080");
-    // Percent-encoded credentials decode before encoding.
+    // Percent-encoded credentials go into Basic auth verbatim (the
+    // reference does not decode them).
     let request = prepared(&["GET", "http://user%40x:p%23w@example.org/"]);
-    let expected = super::basic_authorization("user@x", "p#w");
+    let expected = super::basic_authorization("user%40x", "p%23w");
     assert_eq!(
         request.headers.get("Authorization"),
         Some(expected.as_str())

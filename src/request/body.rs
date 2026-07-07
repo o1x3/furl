@@ -55,6 +55,23 @@ pub fn form_body(items: &RequestItems) -> Option<Body> {
     Some(Body::plain(urlencode(&pairs).into_bytes()))
 }
 
+/// Escape a multipart Content-Disposition parameter value the way the
+/// reference (WHATWG form-data) does: only `\n`, `\r`, and `"` are
+/// percent-encoded (uppercase hex); everything else, including other
+/// control bytes and UTF-8, passes through.
+fn escape_multipart_param(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '\n' => out.push_str("%0A"),
+            '\r' => out.push_str("%0D"),
+            '"' => out.push_str("%22"),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 /// Frame the multipart body from the ordered part sequence.
 pub fn multipart_body(items: &RequestItems, boundary: String) -> Result<Body, BodyError> {
     let mut bytes: Vec<u8> = Vec::new();
@@ -63,7 +80,11 @@ pub fn multipart_body(items: &RequestItems, boundary: String) -> Result<Body, Bo
         match entry {
             MultipartEntry::Text { name, value } => {
                 bytes.extend_from_slice(
-                    format!("Content-Disposition: form-data; name=\"{name}\"\r\n\r\n").as_bytes(),
+                    format!(
+                        "Content-Disposition: form-data; name=\"{}\"\r\n\r\n",
+                        escape_multipart_param(name)
+                    )
+                    .as_bytes(),
                 );
                 bytes.extend_from_slice(value.as_bytes());
             }
@@ -75,8 +96,9 @@ pub fn multipart_body(items: &RequestItems, boundary: String) -> Result<Body, Bo
                     .unwrap_or_default();
                 bytes.extend_from_slice(
                     format!(
-                        "Content-Disposition: form-data; name=\"{}\"; filename=\"{filename}\"\r\n",
-                        field.name
+                        "Content-Disposition: form-data; name=\"{}\"; filename=\"{}\"\r\n",
+                        escape_multipart_param(&field.name),
+                        escape_multipart_param(&filename)
                     )
                     .as_bytes(),
                 );
@@ -129,4 +151,19 @@ pub fn zlib_compress(bytes: &[u8]) -> Vec<u8> {
     let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
     encoder.write_all(bytes).expect("in-memory zlib write");
     encoder.finish().expect("in-memory zlib finish")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::escape_multipart_param;
+
+    #[test]
+    fn multipart_param_escapes_only_quote_cr_lf() {
+        assert_eq!(escape_multipart_param("plain"), "plain");
+        assert_eq!(escape_multipart_param("fi\"eld"), "fi%22eld");
+        assert_eq!(escape_multipart_param("na\r\nme"), "na%0D%0Ame");
+        // Other control bytes and UTF-8 pass through unescaped.
+        assert_eq!(escape_multipart_param("a\tb"), "a\tb");
+        assert_eq!(escape_multipart_param("café"), "café");
+    }
 }

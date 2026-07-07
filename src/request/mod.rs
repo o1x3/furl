@@ -357,9 +357,11 @@ fn extract_userinfo(url: &mut url::Url) -> Option<(String, String)> {
     if url.username().is_empty() && url.password().is_none() {
         return None;
     }
-    let decode = |text: &str| String::from_utf8_lossy(&percent_decode(text.as_bytes())).to_string();
-    let user = decode(url.username());
-    let password = decode(url.password().unwrap_or_default());
+    // The credentials go into Basic auth exactly as they appear in the
+    // authority — the reference does not percent-decode them, so a
+    // `%40` in the userinfo is encoded verbatim, not turned into `@`.
+    let user = url.username().to_string();
+    let password = url.password().unwrap_or_default().to_string();
     let _ = url.set_username("");
     let _ = url.set_password(None);
     Some((user, password))
@@ -437,33 +439,6 @@ fn requote(component: &str, query: bool) -> String {
             out.push('%');
             out.push_str(&format!("{byte:02X}"));
             i += 1;
-        }
-    }
-    out
-}
-
-/// Decode percent escapes; malformed escapes stay literal.
-fn percent_decode(bytes: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        let decoded = (bytes[i] == b'%')
-            .then(|| bytes.get(i + 1..i + 3))
-            .flatten()
-            .and_then(|hex| {
-                let hi = (hex[0] as char).to_digit(16)?;
-                let lo = (hex[1] as char).to_digit(16)?;
-                Some((hi * 16 + lo) as u8)
-            });
-        match decoded {
-            Some(byte) => {
-                out.push(byte);
-                i += 3;
-            }
-            None => {
-                out.push(bytes[i]);
-                i += 1;
-            }
         }
     }
     out
