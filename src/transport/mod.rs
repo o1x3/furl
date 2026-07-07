@@ -67,6 +67,10 @@ pub enum TransportError {
     Protocol(String),
     /// More headers than `--max-headers` allows.
     TooManyHeaders(usize),
+    /// Reaching the proxy itself failed (wraps the underlying failure).
+    Proxy(Box<TransportError>),
+    /// The proxy answered CONNECT with a non-200.
+    TunnelFailed { status: u16, reason: String },
 }
 
 /// Connection-level options resolved from the CLI.
@@ -76,6 +80,8 @@ pub struct TransportOptions {
     pub tls: tls::TlsOptions,
     /// `--max-headers`; zero means unlimited.
     pub max_headers: usize,
+    /// The proxy hop, when one routes this request.
+    pub proxy: Option<crate::proxy::ProxyRoute>,
 }
 
 /// Send one request and read the full response.
@@ -94,8 +100,12 @@ pub fn send(
         .ok_or_else(|| TransportError::Connection("no port for URL scheme".to_string()))?;
     let https = request.url.scheme() == "https";
 
+    if let Some(route) = &options.proxy {
+        return send_via_proxy(request, options, route, &host, port, https);
+    }
+
     let stream = connect(&host, port, options.timeout)?;
-    let head = wire_head(request);
+    let head = wire_head(request, WireForm::Origin, None);
 
     if https {
         let mut stream = tls::wrap(stream, &host, &options.tls)?;
@@ -106,6 +116,102 @@ pub fn send(
         write_request(&mut stream, &head, request)?;
         read_response(&mut stream, request, options)
     }
+}
+
+/// Send through the proxy hop: absolute-form for plain-http targets,
+/// a CONNECT tunnel (then TLS to the target) for https ones.
+fn send_via_proxy(
+    request: &PreparedRequest,
+    options: &TransportOptions,
+    route: &crate::proxy::ProxyRoute,
+    target_host: &str,
+    target_port: u16,
+    target_https: bool,
+) -> Result<RawResponse, TransportError> {
+    let stream = connect(&route.host, route.port, options.timeout)
+        .map_err(|error| TransportError::Proxy(Box::new(error)))?;
+
+    match (target_https, route.https) {
+        (false, false) => {
+            let head = wire_head(request, WireForm::Absolute, route.authorization.as_deref());
+            let mut stream = stream;
+            write_request(&mut stream, &head, request)?;
+            read_response(&mut stream, request, options)
+        }
+        (false, true) => {
+            // TLS to the proxy, absolute-form inside.
+            let head = wire_head(request, WireForm::Absolute, route.authorization.as_deref());
+            let mut stream = tls::wrap(stream, &route.host, &options.tls)
+                .map_err(|error| TransportError::Proxy(Box::new(error)))?;
+            write_request(&mut stream, &head, request)?;
+            read_response(&mut stream, request, options)
+        }
+        (true, false) => {
+            let mut stream = stream;
+            tunnel(&mut stream, target_host, target_port, route)?;
+            let head = wire_head(request, WireForm::Origin, None);
+            let mut stream = tls::wrap(stream, target_host, &options.tls)?;
+            write_request(&mut stream, &head, request)?;
+            read_response(&mut stream, request, options)
+        }
+        (true, true) => {
+            // TLS to the proxy, CONNECT inside, then TLS to the target
+            // nested through the tunnel.
+            let mut stream = tls::wrap(stream, &route.host, &options.tls)
+                .map_err(|error| TransportError::Proxy(Box::new(error)))?;
+            tunnel(&mut stream, target_host, target_port, route)?;
+            let head = wire_head(request, WireForm::Origin, None);
+            let mut stream = tls::wrap(stream, target_host, &options.tls)?;
+            write_request(&mut stream, &head, request)?;
+            read_response(&mut stream, request, options)
+        }
+    }
+}
+
+/// Establish a CONNECT tunnel on the stream. The response head is read
+/// byte-at-a-time so nothing past the blank line is consumed.
+fn tunnel<S: Read + Write>(
+    stream: &mut S,
+    host: &str,
+    port: u16,
+    route: &crate::proxy::ProxyRoute,
+) -> Result<(), TransportError> {
+    let mut head = format!("CONNECT {host}:{port} HTTP/1.1\r\n");
+    if let Some(authorization) = &route.authorization {
+        head.push_str(&format!("Proxy-Authorization: {authorization}\r\n"));
+    }
+    head.push_str(&format!("Host: {host}:{port}\r\n\r\n"));
+    stream.write_all(head.as_bytes()).map_err(stream_error)?;
+    stream.flush().map_err(stream_error)?;
+
+    let mut response = Vec::new();
+    let mut byte = [0u8; 1];
+    loop {
+        let read = stream.read(&mut byte).map_err(stream_error)?;
+        if read == 0 {
+            return Err(TransportError::ClosedWithoutResponse);
+        }
+        response.push(byte[0]);
+        if response.ends_with(b"\r\n\r\n") || response.len() > MAX_HEAD_BYTES {
+            break;
+        }
+    }
+    let status_line = response.split(|b| *b == b'\n').next().unwrap_or_default();
+    let status_line = String::from_utf8_lossy(status_line);
+    let mut parts = status_line.trim_end().splitn(3, ' ');
+    let _version = parts.next().unwrap_or_default();
+    let status: u16 = parts
+        .next()
+        .unwrap_or_default()
+        .parse()
+        .map_err(|_| TransportError::Protocol("malformed proxy response".to_string()))?;
+    if status != 200 {
+        return Err(TransportError::TunnelFailed {
+            status,
+            reason: parts.next().unwrap_or_default().trim().to_string(),
+        });
+    }
+    Ok(())
 }
 
 /// `getaddrinfo` failure codes as the platform defines them.
@@ -193,14 +299,32 @@ fn dns_failure(error: &std::io::Error) -> TransportError {
     TransportError::Dns { code, text }
 }
 
+/// The request-line target form: origin (`/path`) or, through a proxy,
+/// absolute (`http://host/path`).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WireForm {
+    Origin,
+    Absolute,
+}
+
 /// The wire head: request line, then Host, then the prepared headers.
-/// (Display order keeps Host last; the wire leads with it.)
-fn wire_head(request: &PreparedRequest) -> Vec<u8> {
-    let mut head = format!(
-        "{} {} HTTP/1.1\r\n",
-        request.method,
-        request.request_target()
-    );
+/// (Display order keeps Host last; the wire leads with it.) A proxied
+/// request appends Proxy-Authorization after everything else.
+fn wire_head(
+    request: &PreparedRequest,
+    form: WireForm,
+    proxy_authorization: Option<&str>,
+) -> Vec<u8> {
+    let target = match form {
+        WireForm::Origin => request.request_target(),
+        WireForm::Absolute => format!(
+            "{}://{}{}",
+            request.url.scheme(),
+            request.host_netloc,
+            request.request_target()
+        ),
+    };
+    let mut head = format!("{} {} HTTP/1.1\r\n", request.method, target);
     let explicit_host = request
         .headers
         .entries
@@ -219,6 +343,9 @@ fn wire_head(request: &PreparedRequest) -> Vec<u8> {
         head.push_str(": ");
         head.push_str(value);
         head.push_str("\r\n");
+    }
+    if let Some(authorization) = proxy_authorization {
+        head.push_str(&format!("Proxy-Authorization: {authorization}\r\n"));
     }
     head.push_str("\r\n");
     head.into_bytes()

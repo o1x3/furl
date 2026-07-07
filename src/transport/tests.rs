@@ -73,6 +73,7 @@ fn roundtrip(
             timeout: Some(std::time::Duration::from_secs(5)),
             tls: super::tls::TlsOptions::default(),
             max_headers: 0,
+            proxy: None,
         },
     );
     let received = rx
@@ -206,6 +207,7 @@ fn max_headers_is_enforced() {
             timeout: Some(std::time::Duration::from_secs(5)),
             tls: super::tls::TlsOptions::default(),
             max_headers: 10,
+            proxy: None,
         },
     );
     assert!(matches!(

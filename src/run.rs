@@ -725,15 +725,48 @@ fn resolve_tls(args: &ParsedArgs) -> tls::TlsOptions {
         Some("tls1.3") => Some(tls::TlsVersion::Tls13),
         _ => None,
     };
+    let client_key = args.cert_key.as_deref().map(crate::paths::expand_tilde);
+    // An encrypted client key prompts for its passphrase here, once,
+    // before any connection; `--ignore-stdin` suppresses the prompt and
+    // the missing passphrase surfaces as an SSLError at connect time.
+    let cert_key_pass = tls::resolve_key_passphrase(
+        client_key.as_deref(),
+        args.cert_key_pass.clone(),
+        !args.ignore_stdin,
+    );
     tls::TlsOptions {
         verify,
         version,
         client_cert: args.cert.as_deref().map(crate::paths::expand_tilde),
-        client_key: args.cert_key.as_deref().map(crate::paths::expand_tilde),
+        client_key,
+        ciphers: args.ciphers.clone(),
+        cert_key_pass,
     }
 }
 
-fn transport_failure(error: TransportError, timeout: f64, request: &PreparedRequest) -> Failure {
+/// An unusable proxy URL, before any connection is attempted.
+fn proxy_failure(error: crate::proxy::ProxyError) -> Failure {
+    match error {
+        crate::proxy::ProxyError::Socks => {
+            Failure::runtime("InvalidSchema", "SOCKS proxies are not supported")
+        }
+        crate::proxy::ProxyError::UnsupportedScheme(scheme) => Failure::runtime(
+            "ProxySchemeUnknown",
+            format!("Proxy URL had unsupported scheme {scheme}, should use http:// or https://"),
+        ),
+        crate::proxy::ProxyError::Invalid(_) => Failure::runtime(
+            "InvalidProxyURL",
+            "Please check proxy URL. It is malformed and could be missing the host.",
+        ),
+    }
+}
+
+fn transport_failure(
+    error: TransportError,
+    timeout: f64,
+    request: &PreparedRequest,
+    proxy: Option<&crate::proxy::ProxyRoute>,
+) -> Failure {
     // Connection-level failures carry the request they interrupted.
     let suffix = format!(
         " while doing a {} request to URL: {}",
@@ -813,7 +846,103 @@ fn transport_failure(error: TransportError, timeout: f64, request: &PreparedRequ
             "ConnectionError",
             format!("got more than {count} headers{suffix}"),
         ),
+        TransportError::Proxy(inner) => match *inner {
+            // Resolver and timeout failures on the proxy hop read exactly
+            // like the same failures on a direct connection.
+            TransportError::Dns { .. } | TransportError::Timeout => {
+                transport_failure(*inner, timeout, request, None)
+            }
+            other => proxied_failure(other, request, proxy, &suffix),
+        },
+        TransportError::TunnelFailed { status, reason } => {
+            let detail = format!("OSError('Tunnel connection failed: {status} {reason}')");
+            Failure::runtime(
+                "ProxyError",
+                format!(
+                    "{}: Max retries exceeded with url: {} \
+                     (Caused by ProxyError('Unable to connect to proxy', {detail})){suffix}",
+                    proxied_pool(request, proxy),
+                    proxied_url(request),
+                ),
+            )
+        }
     }
+}
+
+/// The pool naming for a proxied failure: https targets name the target
+/// pool; plain-http targets name the proxy's pool.
+fn proxied_pool(request: &PreparedRequest, proxy: Option<&crate::proxy::ProxyRoute>) -> String {
+    let bare = |value: &str| -> String {
+        value
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .to_string()
+    };
+    if request.url.scheme() == "https" {
+        let host = bare(request.url.host_str().unwrap_or_default());
+        let port = request.url.port_or_known_default().unwrap_or(0);
+        format!("HTTPSConnectionPool(host='{host}', port={port})")
+    } else {
+        let (host, port) = proxy
+            .map(|route| (bare(&route.host), route.port))
+            .unwrap_or_default();
+        format!("HTTPConnectionPool(host='{host}', port={port})")
+    }
+}
+
+/// The `Max retries exceeded with url:` value for a proxied failure:
+/// origin-form for https targets, absolute for plain-http ones.
+fn proxied_url(request: &PreparedRequest) -> String {
+    if request.url.scheme() == "https" {
+        request.request_target()
+    } else {
+        format!(
+            "{}://{}{}",
+            request.url.scheme(),
+            request.host_netloc,
+            request.request_target()
+        )
+    }
+}
+
+/// A failure to reach (or be admitted by) the proxy itself.
+fn proxied_failure(
+    inner: TransportError,
+    request: &PreparedRequest,
+    proxy: Option<&crate::proxy::ProxyRoute>,
+    suffix: &str,
+) -> Failure {
+    let bare = |value: &str| -> String {
+        value
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .to_string()
+    };
+    let (proxy_host, proxy_port) = proxy
+        .map(|route| (bare(&route.host), route.port))
+        .unwrap_or_default();
+    let connection_class = if request.url.scheme() == "https" {
+        "HTTPSConnection"
+    } else {
+        "HTTPConnection"
+    };
+    let detail = match inner {
+        TransportError::ConnectFailed { errno, text } => format!(
+            "NewConnectionError(\"{connection_class}(host='{proxy_host}', port={proxy_port}): \
+             Failed to establish a new connection: [Errno {errno}] {text}\")"
+        ),
+        TransportError::Tls(message) => format!("SSLError({message:?})"),
+        other => format!("{other:?}"),
+    };
+    Failure::runtime(
+        "ProxyError",
+        format!(
+            "{}: Max retries exceeded with url: {} \
+             (Caused by ProxyError('Unable to connect to proxy', {detail})){suffix}",
+            proxied_pool(request, proxy),
+            proxied_url(request),
+        ),
+    )
 }
 
 fn is_redirect_status(status: u16) -> bool {
@@ -991,10 +1120,11 @@ fn execute_online(
     items: &RequestItems,
     mut session_state: Option<SessionState>,
 ) -> Result<ExitStatus, Failure> {
-    let options = TransportOptions {
+    let mut options = TransportOptions {
         timeout: (args.timeout > 0.0).then(|| std::time::Duration::from_secs_f64(args.timeout)),
         tls: resolve_tls(args),
         max_headers: usize::try_from(args.max_headers.max(0)).unwrap_or(0),
+        proxy: None,
     };
     let follow = args.follow || args.download;
     let show_all = args.all || args.verbose > 0;
@@ -1086,9 +1216,13 @@ fn execute_online(
 
     let mut hops: i64 = 0;
     loop {
+        // The proxy route follows the current hop's URL (a redirect may
+        // change the scheme or leave a no_proxy host).
+        options.proxy =
+            crate::proxy::route_for(&current.url, &args.proxy).map_err(proxy_failure)?;
         let started_at = std::time::Instant::now();
         let response = transport::send(&current, &options)
-            .map_err(|e| transport_failure(e, args.timeout, &current))?;
+            .map_err(|e| transport_failure(e, args.timeout, &current, options.proxy.as_ref()))?;
         let elapsed = started_at.elapsed();
 
         let host = current.url.host_str().unwrap_or_default().to_string();

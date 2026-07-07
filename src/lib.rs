@@ -15,6 +15,7 @@ pub mod manager;
 pub mod netrc;
 pub mod output;
 pub mod paths;
+pub mod proxy;
 pub mod request;
 mod run;
 pub mod session;
