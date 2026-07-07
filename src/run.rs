@@ -1039,15 +1039,20 @@ fn rebuild_for_redirect(
     }
     request.path_override = None;
 
-    // Method rewriting: 303 (and browser-compatible 301/302 for POST)
-    // turn into bodyless GETs.
-    let method_changes = match response.status {
-        303 => request.method != "HEAD",
-        301 | 302 => request.method == "POST",
+    // Method rewriting (RFC 7231 §6.4.4 plus long-standing browser
+    // behavior): 303 and 302 turn any non-HEAD method into GET; a 301
+    // rewrites only POST.
+    let becomes_get = match response.status {
+        303 | 302 => request.method != "HEAD",
+        301 => request.method == "POST",
         _ => false,
     };
-    if method_changes {
+    if becomes_get {
         request.method = "GET".to_string();
+    }
+    // Every redirect except 307/308 drops the request body and its
+    // framing headers, regardless of whether the method changed.
+    if !matches!(response.status, 307 | 308) {
         request.body = None;
         request.chunked = false;
         request.headers.entries.retain(|(name, _)| {
@@ -1055,6 +1060,14 @@ fn rebuild_for_redirect(
                 || name.eq_ignore_ascii_case("content-type")
                 || name.eq_ignore_ascii_case("transfer-encoding"))
         });
+        // A now-bodyless body-method still carries `Content-Length: 0`
+        // (GET/HEAD/OPTIONS do not), matching a freshly built request.
+        if !matches!(request.method.as_str(), "GET" | "HEAD" | "OPTIONS") {
+            request
+                .headers
+                .entries
+                .push(("Content-Length".to_string(), "0".to_string()));
+        }
     }
 
     // Credentials never travel to a different host.
