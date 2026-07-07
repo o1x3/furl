@@ -147,17 +147,23 @@ pub fn build(context: &BuildContext<'_>) -> Result<PreparedRequest, BuildError> 
         url.set_query(Some(&merged));
     }
 
-    // Requote: percent-escapes of unreserved characters decode back to
-    // the bare character; any malformed escape disables the pass.
-    let requoted_path = unquote_unreserved(url.path());
+    // Requote path and query to the wire form: unreserved escapes decode,
+    // other valid escapes uppercase, a lone `%` becomes `%25`, and any
+    // character outside the component's safe set is percent-encoded.
+    let requoted_path = requote(url.path(), false);
     if requoted_path != url.path() {
         url.set_path(&requoted_path);
     }
-    if let Some(query) = url.query() {
-        let requoted = unquote_unreserved(query);
-        if requoted != query {
-            url.set_query(Some(&requoted));
+    match url.query() {
+        // A bare trailing `?` with no query drops off the wire.
+        Some("") => url.set_query(None),
+        Some(query) => {
+            let requoted = requote(query, true);
+            if requoted != query {
+                url.set_query(Some(&requoted));
+            }
         }
+        None => {}
     }
 
     // -- Body (single-source rule) ---------------------------------------
@@ -353,6 +359,81 @@ fn extract_userinfo(url: &mut url::Url) -> Option<(String, String)> {
 /// Decode percent-escapes of unreserved characters (letters, digits,
 /// `-._~`) back to the bare character. A malformed escape anywhere turns
 /// the whole pass off, leaving the text untouched.
+/// Requote a URL path or query component to the wire form, operating on
+/// the parser's already-encoded component (non-ASCII is already escaped):
+///
+/// - an escape of an unreserved character decodes to the bare character;
+/// - any other valid `%XX` escape is preserved with uppercase hex;
+/// - a `%` that does not begin a valid escape becomes `%25`;
+/// - any character outside the component's safe set is percent-encoded.
+///
+/// The query set additionally allows `?`. This mirrors the reference's
+/// path/query encoding (unreserved + sub-delims + `:@/;=` and, for the
+/// query, `?`).
+fn requote(component: &str, query: bool) -> String {
+    fn is_safe(byte: u8, query: bool) -> bool {
+        byte.is_ascii_alphanumeric()
+            || matches!(
+                byte,
+                b'!' | b'$'
+                    | b'&'
+                    | b'\''
+                    | b'('
+                    | b')'
+                    | b'*'
+                    | b'+'
+                    | b','
+                    | b'-'
+                    | b'.'
+                    | b'/'
+                    | b':'
+                    | b';'
+                    | b'='
+                    | b'@'
+                    | b'_'
+                    | b'~'
+            )
+            || (query && byte == b'?')
+    }
+
+    let bytes = component.as_bytes();
+    let mut out = String::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let byte = bytes[i];
+        if byte == b'%' {
+            if let Some(hex) = bytes.get(i + 1..i + 3) {
+                let hi = (hex[0] as char).to_digit(16);
+                let lo = (hex[1] as char).to_digit(16);
+                if let (Some(hi), Some(lo)) = (hi, lo) {
+                    let value = (hi * 16 + lo) as u8;
+                    if value.is_ascii_alphanumeric() || matches!(value, b'-' | b'.' | b'_' | b'~') {
+                        out.push(value as char);
+                    } else {
+                        out.push('%');
+                        out.push(hex[0].to_ascii_uppercase() as char);
+                        out.push(hex[1].to_ascii_uppercase() as char);
+                    }
+                    i += 3;
+                    continue;
+                }
+            }
+            // A `%` that does not begin a valid escape.
+            out.push_str("%25");
+            i += 1;
+        } else if is_safe(byte, query) {
+            out.push(byte as char);
+            i += 1;
+        } else {
+            out.push('%');
+            out.push_str(&format!("{byte:02X}"));
+            i += 1;
+        }
+    }
+    out
+}
+
+#[allow(dead_code)]
 fn unquote_unreserved(text: &str) -> String {
     let bytes = text.as_bytes();
     let mut has_malformed = false;

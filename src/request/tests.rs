@@ -488,3 +488,39 @@ fn unicode_json_body_is_ascii_escaped_on_the_wire() {
         br#"{"name": "\u00e9"}"#
     );
 }
+
+#[test]
+fn requote_encodes_unsafe_and_normalizes_escapes() {
+    // Brackets and pipes in path and query are percent-encoded.
+    assert_eq!(
+        prepared(&["GET", "http://x.com/[p]?q={v}"]).request_target(),
+        "/%5Bp%5D?q=%7Bv%7D"
+    );
+    assert_eq!(
+        prepared(&["GET", "http://x.com/x?arr[]=1&arr[]=2"]).request_target(),
+        "/x?arr%5B%5D=1&arr%5B%5D=2"
+    );
+    // Existing escapes uppercase; unreserved escapes decode.
+    assert_eq!(
+        prepared(&["GET", "http://x.com/a%2fb?c%2fd"]).request_target(),
+        "/a%2Fb?c%2Fd"
+    );
+    assert_eq!(
+        prepared(&["GET", "http://x.com/%7euser"]).request_target(),
+        "/~user"
+    );
+    // A lone or malformed `%` becomes `%25`.
+    assert_eq!(
+        prepared(&["GET", "http://x.com/pa th/%zz"]).request_target(),
+        "/pa%20th/%25zz"
+    );
+    assert_eq!(
+        prepared(&["GET", "http://x.com/100%done"]).request_target(),
+        "/100%25done"
+    );
+    // `?` stays inside the query but a bare trailing `?` drops.
+    assert_eq!(
+        prepared(&["GET", "http://x.com/a?q=a b&r=c|d"]).request_target(),
+        "/a?q=a%20b&r=c%7Cd"
+    );
+}
