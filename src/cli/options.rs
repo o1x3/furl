@@ -149,6 +149,66 @@ impl OptionSpec {
 }
 
 pub const PRETTY_CHOICES: &[&str] = &["all", "colors", "format", "none"];
+/// Every value `--style` accepts, sorted: the reference's registry of
+/// pygments style names plus its own bundled `auto`, `solarized`, and the
+/// three pie styles. Each 256-color name here has an exact escape table in
+/// `crate::output::color` (see `.dev/gen_styles.py`).
+pub const STYLE_CHOICES: &[&str] = &[
+    "abap",
+    "algol",
+    "algol_nu",
+    "arduino",
+    "auto",
+    "autumn",
+    "borland",
+    "bw",
+    "coffee",
+    "colorful",
+    "default",
+    "dracula",
+    "emacs",
+    "friendly",
+    "friendly_grayscale",
+    "fruity",
+    "github-dark",
+    "gruvbox-dark",
+    "gruvbox-light",
+    "igor",
+    "inkpot",
+    "lightbulb",
+    "lilypond",
+    "lovelace",
+    "manni",
+    "material",
+    "monokai",
+    "murphy",
+    "native",
+    "nord",
+    "nord-darker",
+    "one-dark",
+    "paraiso-dark",
+    "paraiso-light",
+    "pastie",
+    "perldoc",
+    "pie",
+    "pie-dark",
+    "pie-light",
+    "rainbow_dash",
+    "rrt",
+    "sas",
+    "solarized",
+    "solarized-dark",
+    "solarized-light",
+    "staroffice",
+    "stata-dark",
+    "stata-light",
+    "tango",
+    "trac",
+    "vim",
+    "vs",
+    "xcode",
+    "zenburn",
+];
 pub const AUTH_TYPE_CHOICES: &[&str] = &["basic", "bearer", "digest"];
 /// TLS versions the linked TLS backend can actually negotiate.
 pub const SSL_CHOICES: &[&str] = &["tls1.2", "tls1.3"];
@@ -242,7 +302,7 @@ pub const OPTIONS: &[OptionSpec] = &[
         aliases: &["-s", "--style"],
         metavar: Some("STYLE"),
         action: Action::Store,
-        choices: None, // validated against the style registry
+        choices: Some(STYLE_CHOICES),
         group: Group::OutputProcessing,
         hidden: false,
         help: "Output color scheme. 'auto' follows the terminal palette.",
@@ -775,4 +835,27 @@ pub fn find_negation_target(inverted: &str) -> Option<&'static OptionSpec> {
             .iter()
             .any(|a| a.starts_with("--") && *a == inverted)
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn style_choices_are_wired_and_sorted() {
+        // The reference registry (pygments 2.20.0 styles + bundled ones) is
+        // 54 names, presented sorted.
+        assert_eq!(STYLE_CHOICES.len(), 54);
+        assert!(STYLE_CHOICES.windows(2).all(|w| w[0] < w[1]));
+        let spec = find_exact("--style").expect("--style registered");
+        assert_eq!(spec.choices, Some(STYLE_CHOICES));
+    }
+
+    #[test]
+    fn style_choices_include_bundled_names() {
+        for name in ["auto", "pie", "pie-dark", "pie-light", "solarized"] {
+            assert!(STYLE_CHOICES.contains(&name), "{name} missing");
+        }
+        assert!(!STYLE_CHOICES.contains(&"bogus"));
+    }
 }

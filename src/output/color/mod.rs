@@ -3,8 +3,7 @@
 //! This is a clean-room reimplementation of the reference tool's coloring
 //! stage, derived by probing the reference's *observable* byte output rather
 //! than reading its source. The goal is byte-for-byte parity with the
-//! reference when its colorized output is piped, for the two paths that
-//! matter most:
+//! reference when its colorized output is piped, on all three paths:
 //!
 //! 1. The **generic 8/16-color** path (`--style=auto`, or any non-256-color
 //!    terminal). This is the default and the most portable, so it is held to
@@ -12,11 +11,13 @@
 //! 2. The **pie 256-color** path (`--style=pie`/`pie-dark`/`pie-light` on a
 //!    256-color terminal). Also held to strict byte parity. It mirrors
 //!    pygments' `Terminal256Formatter` fed the HTTPie pie style sheets.
-//!
-//! Named non-pie 256-color styles (monokai, solarized, ...) are *not* pursued
-//! to byte parity here: reproducing every pygments style sheet is out of
-//! scope. They fall back to the bundled Solarized-ish 256 palette as a
-//! documented approximation (see [`resolve_style`]).
+//! 3. The **named 256-color** path (`--style=monokai`, `solarized`, ... on a
+//!    256-color terminal). Also held to strict byte parity: the per-style
+//!    escape tables in [`styles_generated`] are captured from pygments'
+//!    `Terminal256Formatter` itself (regenerate with `.dev/gen_styles.py`),
+//!    and the token types mirror the reference's *non-precise* HTTP and
+//!    metadata lexers (all methods collapse to one token type, all status
+//!    classes to another) plus its JSON lexer.
 //!
 //! # Why re-tokenize instead of running a real lexer
 //!
@@ -45,6 +46,10 @@
 // the exact bytes (compact or reindented) we must colorize, so re-serializing
 // would risk diverging from that text. The `crate::json` types are therefore
 // not needed here.
+
+mod styles_generated;
+
+use styles_generated::{Esc, STYLE_TABLES, StyleTable};
 
 /// The color capability of the output terminal, as probed at startup.
 ///
@@ -214,14 +219,18 @@ pub struct Style {
     family: Family,
 
     // --- Head: status / request line ---
-    /// `HTTP` keyword and the version number.
+    /// The `HTTP` keyword (`Keyword.Reserved` in the 256-color lexers).
     proto: Color,
     /// The `/` in `HTTP/1.1`. The generic HTTP lexer tokenizes it as an
-    /// Operator (uncolored); the pie precise lexer colors it grey-bold. It is
-    /// therefore a distinct color from [`proto`].
+    /// Operator (uncolored); the 256-color lexer colors it as its Operator
+    /// token. It is therefore a distinct color from [`proto`].
     ///
     /// [`proto`]: Style::proto
     proto_slash: Color,
+    /// The version number after the slash. A `Number` token in the 256-color
+    /// lexer, so named styles color it differently from the `HTTP` keyword;
+    /// generic and pie styles give both the same color.
+    proto_version: Color,
     /// The `GET`/`POST`/... method (per-method in pie, uniform in 8-color).
     method_get: Color,
     method_post: Color,
@@ -244,8 +253,15 @@ pub struct Style {
     // --- Head: header lines ---
     header_name: Color,
     header_value: Color,
-    /// The `:` separating a header name from its value (colored only in pie).
+    /// The `:` separating a header name from its value (uncolored in the
+    /// generic style).
     header_colon: Color,
+
+    // --- Inter-field text ---
+    /// The plain `Text` token: the single spaces between head/meta fields.
+    /// Uncolored in the generic and pie styles, but some named styles color
+    /// every `Text` token (their sheet styles the `Token` root).
+    text: Color,
 
     // --- Meta ---
     meta_key: Color,
@@ -260,7 +276,12 @@ pub struct Style {
     // --- Body (JSON) ---
     json_key: Color,
     json_string: Color,
-    json_number: Color,
+    /// Integer literals (`Number.Integer`). A few named styles (colorful,
+    /// murphy, zenburn) color integers and floats differently, so the two
+    /// are distinct slots; generic and pie styles fill them identically.
+    json_number_int: Color,
+    /// Float literals (`Number.Float`): any number with a `.` or exponent.
+    json_number_float: Color,
     json_keyword: Color,
     json_punct: Color,
     json_ws: Color,
@@ -278,10 +299,12 @@ pub struct Style {
 ///   behavior: a requested 256 style is ignored on an 8-color terminal.
 /// - `pie` / `pie-dark` / `pie-light` on a 256-color terminal yield the pie
 ///   256 style at shade 600 / 500 / 700 respectively.
-/// - Any other named style on a 256-color terminal is *approximated* by the
-///   pie shade-600 palette. Byte parity with arbitrary pygments styles is out
-///   of scope; this keeps such styles colored and legible without pretending
-///   to match the reference byte-for-byte.
+/// - Any other named style on a 256-color terminal resolves through the
+///   generated per-style escape tables ([`styles_generated`]), which are
+///   byte-exact vs the reference's `Terminal256Formatter`. A name missing
+///   from the tables (unreachable via the CLI, whose `--style` choices match
+///   the table set) falls back to the bundled `solarized` sheet — exactly the
+///   reference's fallback for a style name pygments does not know.
 ///
 /// A [`ColorDepth::None`] depth still resolves to a style (the generic one),
 /// but the caller is expected to gate on [`colors_active`] first and skip
@@ -295,9 +318,73 @@ pub fn resolve_style(style_name: &str, depth: ColorDepth) -> Style {
     match style_name {
         "pie-dark" => pie_style(Shade::S500),
         "pie-light" => pie_style(Shade::S700),
-        // `pie`/`pie-universal` and any other named style map to shade 600.
-        // Named non-pie styles are an intentional approximation (see docs).
-        _ => pie_style(Shade::S600),
+        "pie" => pie_style(Shade::S600),
+        name => named_style(find_table(name).unwrap_or_else(|| {
+            // The reference maps unknown names to its bundled solarized
+            // sheet; mirror that so the function stays total.
+            find_table("solarized").expect("bundled solarized table")
+        })),
+    }
+}
+
+/// Look up a generated style table by name (the tables are sorted).
+fn find_table(name: &str) -> Option<&'static StyleTable> {
+    STYLE_TABLES
+        .binary_search_by(|table| table.name.cmp(name))
+        .ok()
+        .map(|index| &STYLE_TABLES[index])
+}
+
+/// Build a [`Style`] from a generated escape table: each semantic slot maps
+/// to the token type the reference's non-precise lexers emit for it (see the
+/// field docs in [`styles_generated::StyleTable`]).
+fn named_style(table: &StyleTable) -> Style {
+    let color = |esc: Esc| Color {
+        start: esc.0.to_string(),
+        reset: esc.1.to_string(),
+    };
+    // The non-precise HTTP lexer collapses every method to `Name.Function`
+    // and the protocol version, status code, reason phrase, and elapsed-time
+    // value all to `Number`; colons and the proto slash are `Operator`.
+    let method = color(table.name_function);
+    let number = color(table.number);
+    let operator = color(table.operator);
+    Style {
+        family: Family::Ansi256,
+        proto: color(table.keyword_reserved),
+        proto_slash: operator.clone(),
+        proto_version: number.clone(),
+        method_get: method.clone(),
+        method_post: method.clone(),
+        method_put: method.clone(),
+        method_delete: method.clone(),
+        method_other: method,
+        url: color(table.name_namespace),
+        status_1xx: number.clone(),
+        status_2xx: number.clone(),
+        status_3xx: number.clone(),
+        status_4xx: number.clone(),
+        status_5xx: number.clone(),
+        reason: number.clone(),
+        header_name: color(table.name_attribute),
+        header_value: color(table.string),
+        header_colon: operator.clone(),
+        text: color(table.text),
+        meta_key: color(table.name_decorator),
+        meta_colon: operator,
+        meta_fast: number.clone(),
+        meta_avg: number.clone(),
+        meta_slow: number.clone(),
+        meta_very_slow: number,
+        meta_unit: color(table.name_builtin),
+        json_key: color(table.name_tag),
+        json_string: color(table.string_double),
+        json_number_int: color(table.number_integer),
+        json_number_float: color(table.number_float),
+        json_keyword: color(table.keyword_constant),
+        json_punct: color(table.punctuation),
+        json_ws: color(table.whitespace),
+        json_error: color(table.error),
     }
 }
 
@@ -333,6 +420,8 @@ fn generic_style() -> Style {
         proto: blue.clone(),
         // The `/` is an Operator in the generic lexer → uncolored.
         proto_slash: Color::none(),
+        // The version is the same blue as the `HTTP` keyword here.
+        proto_version: blue.clone(),
         // The generic HTTP lexer is non-"precise": all methods collapse to
         // Name.Function → green. Per-method coloring only exists in pie.
         method_get: green.clone(),
@@ -352,6 +441,8 @@ fn generic_style() -> Style {
         header_name: cyan.clone(),
         header_value: Color::none(),
         header_colon: Color::none(),
+        // Plain Text (inter-field spaces) is uncolored in the generic style.
+        text: Color::none(),
         meta_key: bright_black,
         meta_colon: Color::none(),
         // The generic metadata lexer colors the whole timing value as Number
@@ -363,7 +454,8 @@ fn generic_style() -> Style {
         meta_unit: cyan.clone(),
         json_key: bright_blue,
         json_string: yellow,
-        json_number: blue.clone(),
+        json_number_int: blue.clone(),
+        json_number_float: blue.clone(),
         json_keyword: blue,
         json_punct: Color::none(),
         json_ws: white,
@@ -478,6 +570,8 @@ fn pie_style(shade: Shade) -> Style {
         proto: grey_bold.clone(),
         // The `/` is grey-bold in the pie precise lexer.
         proto_slash: grey_bold.clone(),
+        // The version shares the grey-bold of the `HTTP` keyword in pie.
+        proto_version: grey_bold.clone(),
         method_get: col(&GREEN, true),
         method_post: col(&YELLOW, true),
         method_put: col(&ORANGE, true),
@@ -496,6 +590,8 @@ fn pie_style(shade: Shade) -> Style {
         header_name: col(&BLUE, false),
         header_value: primary_plain.clone(),
         header_colon: grey_bold.clone(),
+        // The pie header sheet leaves plain Text unstyled → raw spaces.
+        text: Color::none(),
         meta_key: grey_plain.clone(),
         meta_colon: grey_bold,
         // Speed classes reuse the status class colors, bold (§9).
@@ -507,7 +603,8 @@ fn pie_style(shade: Shade) -> Style {
         meta_unit: Color::none(),
         json_key: col(&PINK, false),
         json_string: col(&GREEN, false),
-        json_number: col(&AQUA, false),
+        json_number_int: col(&AQUA, false),
+        json_number_float: col(&AQUA, false),
         json_keyword: col(&ORANGE, false),
         json_punct: grey_plain,
         // Whitespace and the XSSI Error prefix are both PRIMARY in the body
@@ -737,10 +834,10 @@ fn colorize_status_line(out: &mut String, line: &str, style: &Style) {
 
     if let Some(code) = code_field {
         let status_color = status_color(code, style);
-        out.push(' ');
+        style.emit(out, &style.text, " ");
         style.emit(out, status_color, code);
         if let Some(reason) = reason_field {
-            out.push(' ');
+            style.emit(out, &style.text, " ");
             // The reason phrase: a distinct cyan token in the generic lexer,
             // but the same status-class color as the code in pie. An empty
             // reason emits nothing (the head is stripped afterwards, so the
@@ -766,23 +863,23 @@ fn colorize_request_line(out: &mut String, line: &str, style: &Style) {
 
     style.emit(out, method_color(method, style), method);
     if let Some(path) = path {
-        out.push(' ');
+        style.emit(out, &style.text, " ");
         style.emit(out, &style.url, path);
     }
     if let Some(proto) = proto {
-        out.push(' ');
+        style.emit(out, &style.text, " ");
         emit_proto(out, proto, style);
     }
 }
 
 /// Emit an `HTTP/<version>` field as the reference's three separate proto
-/// tokens: `HTTP`, the `/`, and the version number.
+/// tokens: `HTTP` (keyword), the `/` (operator), and the version (number).
 fn emit_proto(out: &mut String, field: &str, style: &Style) {
     match field.split_once('/') {
         Some((name, version)) => {
             style.emit(out, &style.proto, name);
             style.emit(out, &style.proto_slash, "/");
-            style.emit(out, &style.proto, version);
+            style.emit(out, &style.proto_version, version);
         }
         // No slash (unexpected): color the whole field as proto.
         None => style.emit(out, &style.proto, field),
@@ -803,7 +900,7 @@ fn colorize_header_line(out: &mut String, line: &str, style: &Style) {
             let value = rest.strip_prefix(' ');
             match value {
                 Some(value) => {
-                    out.push(' ');
+                    style.emit(out, &style.text, " ");
                     style.emit(out, &style.header_value, value);
                 }
                 None => style.emit(out, &style.header_value, rest),
@@ -870,10 +967,11 @@ pub fn colorize_meta(text: &str, style: &Style) -> String {
     };
 
     style.emit(&mut out, &style.meta_key, key);
-    // The `:` is an Operator (uncolored in generic; grey-bold in pie), and the
-    // separating space is a plain Text token (always uncolored).
+    // The `:` is an Operator (uncolored in generic; grey-bold in pie), and
+    // the separating space is a plain Text token (colored only by named
+    // styles whose sheet styles the `Token` root).
     style.emit(&mut out, &style.meta_colon, ":");
-    out.push(' ');
+    style.emit(&mut out, &style.text, " ");
 
     // Split the value into the numeric part and the `s` unit. The value looks
     // like `<digits>.<digits>s`; the unit is the trailing non-digit suffix.
@@ -984,7 +1082,8 @@ pub fn colorize_body(text: &str, mime: Option<&str>, style: &Style) -> String {
         let color = match kind {
             JsonTok::Key => &style.json_key,
             JsonTok::String => &style.json_string,
-            JsonTok::Number => &style.json_number,
+            JsonTok::NumberInt => &style.json_number_int,
+            JsonTok::NumberFloat => &style.json_number_float,
             JsonTok::Keyword => &style.json_keyword,
             JsonTok::Punct => &style.json_punct,
             JsonTok::Whitespace => &style.json_ws,
@@ -1003,14 +1102,16 @@ pub fn colorize_body(text: &str, mime: Option<&str>, style: &Style) -> String {
 
 /// A JSON token kind, matching the pygments `JsonLexer` categories the
 /// reference colors: object *keys* (`Name.Tag`) are distinguished from string
-/// *values* (`String.Double`); numbers, keyword constants (`true`/`false`/
-/// `null`), punctuation, and whitespace are the rest. `Error` covers an
-/// XSSI/anti-hijacking prefix.
+/// *values* (`String.Double`); integers (`Number.Integer`) from floats
+/// (`Number.Float`, i.e. any number with a `.` or exponent); keyword
+/// constants (`true`/`false`/`null`), punctuation, and whitespace are the
+/// rest. `Error` covers an XSSI/anti-hijacking prefix.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum JsonTok {
     Key,
     String,
-    Number,
+    NumberInt,
+    NumberFloat,
     Keyword,
     Punct,
     Whitespace,
@@ -1087,14 +1188,18 @@ fn json_tokens(input: &str) -> Vec<Token<'_>> {
                 });
                 i += 1;
             }
-            // A number: optional sign, digits, `.`, exponent.
+            // A number: optional sign, digits, `.`, exponent. pygments
+            // classifies it as a float iff it has a `.` or an exponent.
             b'-' | b'0'..=b'9' => {
                 let start = i;
                 i = scan_number(bytes, i);
-                tokens.push(Token {
-                    kind: JsonTok::Number,
-                    text: &input[start..i],
-                });
+                let text = &input[start..i];
+                let kind = if text.bytes().any(|b| matches!(b, b'.' | b'e' | b'E')) {
+                    JsonTok::NumberFloat
+                } else {
+                    JsonTok::NumberInt
+                };
+                tokens.push(Token { kind, text });
             }
             // A keyword constant: true / false / null.
             b't' | b'f' | b'n' => {
@@ -1659,13 +1764,131 @@ mod tests {
     }
 
     #[test]
-    fn resolve_named_non_pie_approximates_with_pie_600() {
-        // Documented approximation: an arbitrary named style on a 256 term
-        // falls back to the pie shade-600 palette.
+    fn resolve_unknown_named_style_falls_back_to_solarized() {
+        // The reference maps a style name pygments does not know to its
+        // bundled solarized sheet; the CLI rejects such names, but the
+        // resolver mirrors the fallback to stay total.
         assert_eq!(
-            resolve_style("monokai", ColorDepth::Ansi256),
-            pie_style(Shade::S600)
+            resolve_style("not-a-style", ColorDepth::Ansi256),
+            resolve_style("solarized", ColorDepth::Ansi256)
         );
+    }
+
+    #[test]
+    fn resolve_named_style_downgrades_to_generic_on_ansi8() {
+        // Any named 256-color style on a non-256 terminal is ignored.
+        assert_eq!(resolve_style("monokai", ColorDepth::Ansi8), generic_style());
+    }
+
+    #[test]
+    fn style_tables_are_sorted_for_binary_search() {
+        assert!(STYLE_TABLES.windows(2).all(|w| w[0].name < w[1].name));
+    }
+
+    #[test]
+    fn every_cli_style_choice_resolves_to_a_distinct_path() {
+        // Every name `--style` accepts must resolve: `auto` → generic,
+        // pie names → pie shades, everything else → its own table (not the
+        // solarized fallback, except solarized itself).
+        for name in crate::cli::options::STYLE_CHOICES {
+            let style = resolve_style(name, ColorDepth::Ansi256);
+            match *name {
+                "auto" => assert_eq!(style.family, Family::Ansi8),
+                _ => assert_eq!(style.family, Family::Ansi256),
+            }
+            if !matches!(*name, "auto" | "pie" | "pie-dark" | "pie-light") {
+                assert!(
+                    find_table(name).is_some(),
+                    "style {name} accepted by the CLI but missing a table"
+                );
+            }
+        }
+    }
+
+    // --- Named 256-color styles (byte-exact vs the reference formatter) ---
+
+    #[test]
+    fn monokai_response_head_byte_exact() {
+        // monokai styles the `Token` root, so even the inter-field spaces
+        // carry escapes; the reason phrase shares the Number color of the
+        // status code (non-precise lexer).
+        let style = resolve_style("monokai", ColorDepth::Ansi256);
+        let head =
+            "HTTP/1.1 404 Not Found\r\nServer: BaseHTTP/0.6\r\nContent-Type: application/json";
+        let out = colorize_response_head(head, &style);
+        let expected = concat!(
+            "\x1b[38;5;81mHTTP\x1b[39m\x1b[38;5;204m/\x1b[39m\x1b[38;5;141m1.1\x1b[39m",
+            "\x1b[38;5;255m \x1b[39m\x1b[38;5;141m404\x1b[39m",
+            "\x1b[38;5;255m \x1b[39m\x1b[38;5;141mNot Found\x1b[39m\n",
+            "\x1b[38;5;148mServer\x1b[39m\x1b[38;5;204m:\x1b[39m",
+            "\x1b[38;5;255m \x1b[39m\x1b[38;5;186mBaseHTTP/0.6\x1b[39m\n",
+            "\x1b[38;5;148mContent-Type\x1b[39m\x1b[38;5;204m:\x1b[39m",
+            "\x1b[38;5;255m \x1b[39m\x1b[38;5;186mapplication/json\x1b[39m",
+        );
+        assert_eq!(out, expected);
+    }
+
+    #[test]
+    fn monokai_request_head_byte_exact() {
+        let style = resolve_style("monokai", ColorDepth::Ansi256);
+        let head = "GET /get?x=1 HTTP/1.1\r\nHost: example.org";
+        let out = colorize_request_head(head, &style);
+        let expected = concat!(
+            "\x1b[38;5;148mGET\x1b[39m\x1b[38;5;255m \x1b[39m",
+            "\x1b[38;5;255m/get?x=1\x1b[39m\x1b[38;5;255m \x1b[39m",
+            "\x1b[38;5;81mHTTP\x1b[39m\x1b[38;5;204m/\x1b[39m\x1b[38;5;141m1.1\x1b[39m\n",
+            "\x1b[38;5;148mHost\x1b[39m\x1b[38;5;204m:\x1b[39m",
+            "\x1b[38;5;255m \x1b[39m\x1b[38;5;186mexample.org\x1b[39m",
+        );
+        assert_eq!(out, expected);
+    }
+
+    #[test]
+    fn zenburn_json_body_int_float_byte_exact() {
+        // zenburn is one of the styles that colors integers (116) and floats
+        // (251) differently; its keys are bold (`;01` open, `;00` reset).
+        let style = resolve_style("zenburn", ColorDepth::Ansi256);
+        let body = "{\n    \"a\": 1,\n    \"b\": 2.5,\n    \"ok\": true,\n    \"s\": \"hi\"\n}";
+        let out = colorize_body(body, Some("application/json"), &style);
+        let expected = concat!(
+            "\x1b[38;5;230m{\x1b[39m\n\x1b[38;5;188m    \x1b[39m",
+            "\x1b[38;5;174;01m\"a\"\x1b[39;00m\x1b[38;5;230m:\x1b[39m\x1b[38;5;188m \x1b[39m",
+            "\x1b[38;5;116m1\x1b[39m\x1b[38;5;230m,\x1b[39m\n\x1b[38;5;188m    \x1b[39m",
+            "\x1b[38;5;174;01m\"b\"\x1b[39;00m\x1b[38;5;230m:\x1b[39m\x1b[38;5;188m \x1b[39m",
+            "\x1b[38;5;251m2.5\x1b[39m\x1b[38;5;230m,\x1b[39m\n\x1b[38;5;188m    \x1b[39m",
+            "\x1b[38;5;174;01m\"ok\"\x1b[39;00m\x1b[38;5;230m:\x1b[39m\x1b[38;5;188m \x1b[39m",
+            "\x1b[38;5;181mtrue\x1b[39m\x1b[38;5;230m,\x1b[39m\n\x1b[38;5;188m    \x1b[39m",
+            "\x1b[38;5;174;01m\"s\"\x1b[39;00m\x1b[38;5;230m:\x1b[39m\x1b[38;5;188m \x1b[39m",
+            "\x1b[38;5;174m\"hi\"\x1b[39m\n\x1b[38;5;230m}\x1b[39m\n",
+        );
+        assert_eq!(out, expected);
+    }
+
+    #[test]
+    fn monokai_xssi_prefix_byte_exact() {
+        // monokai's Error token carries a *background* color: the open is
+        // `38;5;198;48;5;233` and the reset must include `49` (bg reset).
+        let style = resolve_style("monokai", ColorDepth::Ansi256);
+        let out = colorize_body(")]}',\n{\"a\":1}", Some("application/json"), &style);
+        let expected = concat!(
+            "\x1b[38;5;198;48;5;233m)]}',\x1b[39;49m\n",
+            "\x1b[38;5;255m{\x1b[39m\x1b[38;5;204m\"a\"\x1b[39m\x1b[38;5;255m:\x1b[39m",
+            "\x1b[38;5;141m1\x1b[39m\x1b[38;5;255m}\x1b[39m\n",
+        );
+        assert_eq!(out, expected);
+    }
+
+    #[test]
+    fn solarized_meta_byte_exact() {
+        // The bundled solarized sheet: key blue (33), colon/space BASE1
+        // (245), value cyan (37), unit blue (33).
+        let style = resolve_style("solarized", ColorDepth::Ansi256);
+        let out = colorize_meta("Elapsed time: 0.302s", &style);
+        let expected = concat!(
+            "\x1b[38;5;33mElapsed time\x1b[39m\x1b[38;5;245m:\x1b[39m",
+            "\x1b[38;5;245m \x1b[39m\x1b[38;5;37m0.302\x1b[39m\x1b[38;5;33ms\x1b[39m",
+        );
+        assert_eq!(out, expected);
     }
 
     // --- Head joining / stripping details ---
@@ -1714,11 +1937,21 @@ mod tests {
 
     #[test]
     fn json_number_forms() {
-        for n in ["0", "-1", "3.14", "1e10", "-2.5E-3", "42"] {
+        // pygments classifies a number as Float iff it has a `.` or an
+        // exponent; everything else is Integer.
+        let cases = [
+            ("0", JsonTok::NumberInt),
+            ("-1", JsonTok::NumberInt),
+            ("42", JsonTok::NumberInt),
+            ("3.14", JsonTok::NumberFloat),
+            ("1e10", JsonTok::NumberFloat),
+            ("-2.5E-3", JsonTok::NumberFloat),
+        ];
+        for (n, kind) in cases {
             let body = format!("[{n}]");
             let toks = json_tokens(&body);
             // Second token (after `[`) is the number, spanning it entirely.
-            assert_eq!(toks[1].kind, JsonTok::Number);
+            assert_eq!(toks[1].kind, kind, "number {n}");
             assert_eq!(toks[1].text, n, "number {n}");
         }
     }
