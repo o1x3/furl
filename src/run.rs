@@ -307,9 +307,16 @@ fn execute(
         args.download = false;
         args.download_resume = false;
     }
-    if args.download_resume && !(args.download && args.output.is_some()) {
+    // --continue needs --download, and then an explicit --output to
+    // resume into (two distinct errors, as the reference reports).
+    if args.download_resume && !args.download {
         return Err(Failure::Usage(
             "--continue only works with --download".to_string(),
+        ));
+    }
+    if args.download_resume && !(args.download && args.output.is_some()) {
+        return Err(Failure::Usage(
+            "--continue requires --output to be specified".to_string(),
         ));
     }
 
