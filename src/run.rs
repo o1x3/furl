@@ -480,6 +480,9 @@ fn execute(
         BuildError::InvalidUrl { url, reason } => {
             Failure::runtime("InvalidURL", format!("Invalid URL '{url}': {reason}"))
         }
+        BuildError::UrlParseFailed { url } => {
+            Failure::runtime("InvalidURL", format!("Failed to parse: {url}"))
+        }
         BuildError::NestedJson(error) => Failure::Annotated(error.to_string()),
         BuildError::Body(message) => Failure::runtime("IOError", message),
         BuildError::PasswordRequired { user } => Failure::Usage(format!(

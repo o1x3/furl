@@ -162,6 +162,13 @@ fn push_repr_byte(out: &mut String, byte: u8, quote: char) {
     }
 }
 
+/// A filesystem error rendered the way Python's `OSError` prints it:
+/// `[Errno N] {strerror}: '{path}'`.
+pub fn file_error(path: &str, error: &std::io::Error) -> String {
+    let (errno, text) = os_error_parts(error);
+    format!("[Errno {errno}] {text}: '{path}'")
+}
+
 /// The three-block usage error: usage line, message, help pointer.
 ///
 /// When the error came from a specific option, that option is shown in

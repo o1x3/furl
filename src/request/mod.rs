@@ -66,8 +66,10 @@ impl PreparedRequest {
 pub enum BuildError {
     /// Rendered as a usage error (usage block + exit 1).
     Usage(String),
-    /// Rendered as a runtime error line (`furl: error: …`).
+    /// A missing/empty host: `Invalid URL '<url>': No host supplied`.
     InvalidUrl { url: String, reason: String },
+    /// A URL that does not parse: `Failed to parse: <url>`.
+    UrlParseFailed { url: String },
     /// Nested-JSON errors carry their own annotated rendering.
     NestedJson(NestedJsonError),
     /// File access problems while materializing the body.
@@ -131,9 +133,16 @@ pub fn build(context: &BuildContext<'_>) -> Result<PreparedRequest, BuildError> 
             reason: "No host supplied".to_string(),
         });
     }
-    let mut url = url::Url::parse(&normalized).map_err(|error| BuildError::InvalidUrl {
-        url: normalized.clone(),
-        reason: url_error_reason(error),
+    let mut url = url::Url::parse(&normalized).map_err(|error| match error {
+        // A missing host is reported as such; every other parse failure
+        // reads as the reference's generic "Failed to parse".
+        url::ParseError::EmptyHost => BuildError::InvalidUrl {
+            url: normalized.clone(),
+            reason: "No host supplied".to_string(),
+        },
+        _ => BuildError::UrlParseFailed {
+            url: normalized.clone(),
+        },
     })?;
     if url.host().is_none() {
         return Err(BuildError::InvalidUrl {

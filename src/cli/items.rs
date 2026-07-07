@@ -216,8 +216,12 @@ pub fn process_items(
                     }
                     let field = file_field(&key, &value);
                     // Openability is checked now; contents stream later.
-                    std::fs::File::open(&field.path)
-                        .map_err(|error| ItemError::new(format!("'{token}': {error}")))?;
+                    std::fs::File::open(&field.path).map_err(|error| {
+                        ItemError::new(format!(
+                            "'{token}': {}",
+                            crate::errors::file_error(&field.path.to_string_lossy(), &error)
+                        ))
+                    })?;
                     items.body_file = Some(BodyFile { path: field.path });
                 } else {
                     invalid_file_fields.push(key);
@@ -253,8 +257,12 @@ fn file_field(key: &str, value: &str) -> FileField {
 /// Read a `…@path` embedded value as UTF-8 text.
 fn read_text_file(token: &str, path: &str) -> Result<String, ItemError> {
     let expanded = expand_tilde(path);
-    let bytes =
-        std::fs::read(&expanded).map_err(|error| ItemError::new(format!("'{token}': {error}")))?;
+    let bytes = std::fs::read(&expanded).map_err(|error| {
+        ItemError::new(format!(
+            "'{token}': {}",
+            crate::errors::file_error(&expanded.to_string_lossy(), &error)
+        ))
+    })?;
     String::from_utf8(bytes).map_err(|_| {
         ItemError::new(format!(
             "'{token}': cannot embed the content of '{path}', \
