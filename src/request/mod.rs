@@ -134,7 +134,7 @@ pub fn build(context: &BuildContext<'_>) -> Result<PreparedRequest, BuildError> 
     }
 
     let userinfo = extract_userinfo(&mut url);
-    let host_netloc = netloc_of(&normalized);
+    let host_netloc = netloc_of(&url, &normalized);
     let original_path = args.path_as_is.then(|| raw_path_of(&normalized));
 
     // Query parameters append after any query already in the URL.
@@ -420,7 +420,22 @@ fn percent_decode(bytes: &[u8]) -> Vec<u8> {
 }
 
 /// The authority component as typed: userinfo stripped, port kept.
-fn netloc_of(normalized_url: &str) -> String {
+/// The `Host`-header authority: the parsed host (IDNA-encoded and
+/// lowercased by the URL parser, IPv6 kept bracketed) plus the port
+/// exactly as typed — an explicit port survives even when it is the
+/// scheme default, so `example.com:80` and `[::1]:80` round-trip.
+fn netloc_of(url: &url::Url, normalized_url: &str) -> String {
+    let host = url.host_str().unwrap_or_default().to_string();
+    match explicit_port(normalized_url) {
+        Some(port) => format!("{host}:{port}"),
+        None => host,
+    }
+}
+
+/// The port digits an authority typed explicitly, or `None` when the URL
+/// relied on the scheme default. IPv6 literals keep their brackets, so
+/// the port is what follows `]:`.
+fn explicit_port(normalized_url: &str) -> Option<&str> {
     let after_scheme = match normalized_url.find("://") {
         Some(at) => &normalized_url[at + 3..],
         None => normalized_url,
@@ -433,8 +448,12 @@ fn netloc_of(normalized_url: &str) -> String {
         Some(at) => &authority[at + 1..],
         None => authority,
     };
-    // Hostnames compare case-insensitively; the wire form is lowercase.
-    host_port.to_lowercase()
+    let port = match host_port.rfind(']') {
+        // IPv6: the port is whatever follows the closing bracket's colon.
+        Some(bracket) => host_port[bracket + 1..].strip_prefix(':')?,
+        None => host_port.rsplit_once(':').map(|(_, port)| port)?,
+    };
+    (!port.is_empty() && port.bytes().all(|b| b.is_ascii_digit())).then_some(port)
 }
 
 /// The path exactly as typed (before normalization), for `--path-as-is`.
@@ -486,7 +505,12 @@ fn resolve_authorization(
 /// URL argument.
 pub fn host_for_prompt(url_argument: &str, default_scheme: &str) -> String {
     let normalized = normalize_url(url_argument, default_scheme);
-    netloc_of(&normalized)
+    match url::Url::parse(&normalized) {
+        Ok(url) => netloc_of(&url, &normalized),
+        // Unparseable here means the build path will reject it; fall back
+        // to the raw authority for the prompt only.
+        Err(_) => normalized,
+    }
 }
 
 /// Split `user:password` on the first unescaped colon; no colon means
