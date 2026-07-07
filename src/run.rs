@@ -647,7 +647,13 @@ impl Emitter {
         if let Some(meta) = &message.meta {
             // The meta text already carries its "Elapsed time: …" label
             // (and any coloring); the writer only supplies the separators.
-            self.write(format!("\n\n{meta}\n\n").as_bytes());
+            // The leading separator belongs to the body *section*: it
+            // appears only when that section was selected.
+            if message.body.is_some() {
+                self.write(b"\n\n");
+            }
+            self.write(meta.as_bytes());
+            self.write(b"\n\n");
         } else if self.tty && printed_bytes {
             // On a terminal, a body-printing message ends with a blank
             // line (unless meta already supplied its trailing separator).
