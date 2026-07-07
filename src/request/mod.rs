@@ -354,13 +354,6 @@ fn map_body_error<T>(result: Result<T, body::BodyError>) -> Result<T, BuildError
     })
 }
 
-fn url_error_reason(error: url::ParseError) -> String {
-    match error {
-        url::ParseError::EmptyHost => "No host supplied".to_string(),
-        other => other.to_string(),
-    }
-}
-
 /// Pull `user:password@` out of the URL, percent-decoded.
 fn extract_userinfo(url: &mut url::Url) -> Option<(String, String)> {
     if url.username().is_empty() && url.password().is_none() {
