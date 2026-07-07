@@ -175,10 +175,7 @@ fn parse(text: &str) -> Option<Vec<Entry>> {
         };
 
         // Consume follower tokens until the next top-level keyword or EOF.
-        loop {
-            let Some(token) = lexer.next_token() else {
-                break;
-            };
+        while let Some(token) = lexer.next_token() {
             // Inside an entry, *any* `#`-leading token (not just a bare `#`)
             // comments out the remainder of its physical line.
             if token.starts_with('#') {

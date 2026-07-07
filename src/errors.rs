@@ -80,11 +80,13 @@ pub fn os_error_class(kind: std::io::ErrorKind) -> &'static str {
 }
 
 /// The errno and text of an I/O error, with a broken-pipe fallback for
-/// synthetic errors that carry no errno (`32` is `EPIPE` everywhere).
+/// synthetic errors that carry no errno. The `EPIPE` number (32) and its
+/// text are fixed to the reference form regardless of platform (on
+/// Windows, OS error 32 is unrelated to broken pipes).
 pub fn os_error_parts(error: &std::io::Error) -> (i32, String) {
     match error.raw_os_error() {
         Some(errno) => (errno, os_error_text(errno)),
-        None if error.kind() == std::io::ErrorKind::BrokenPipe => (32, os_error_text(32)),
+        None if error.kind() == std::io::ErrorKind::BrokenPipe => (32, "Broken pipe".to_string()),
         None => (5, error.to_string()),
     }
 }
@@ -228,9 +230,10 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn os_error_text_strips_the_os_error_suffix() {
-        // EPIPE is 32 everywhere this builds.
+        // EPIPE is 32 on Unix; on Windows OS error 32 is unrelated.
         assert_eq!(os_error_text(32), "Broken pipe");
     }
 
