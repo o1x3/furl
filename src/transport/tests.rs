@@ -210,9 +210,10 @@ fn max_headers_is_enforced() {
             proxy: None,
         },
     );
+    // The error names the configured limit, not the count seen.
     assert!(matches!(
         result,
-        Err(super::TransportError::TooManyHeaders(n)) if n > 10
+        Err(super::TransportError::TooManyHeaders(10))
     ));
 }
 

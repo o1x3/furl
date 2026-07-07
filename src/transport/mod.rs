@@ -472,7 +472,8 @@ fn parse_head(
     }
     let header_count = response.headers.len();
     if options.max_headers > 0 && header_count > options.max_headers {
-        return Err(TransportError::TooManyHeaders(header_count));
+        // The message names the configured limit, not the count seen.
+        return Err(TransportError::TooManyHeaders(options.max_headers));
     }
     let http_version = match response.version {
         Some(0) => "1.0",

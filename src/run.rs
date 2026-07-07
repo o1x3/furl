@@ -684,9 +684,11 @@ impl Emitter {
             }
             self.write(meta.as_bytes());
             self.write(b"\n\n");
-        } else if self.tty && printed_bytes {
-            // On a terminal, a body-printing message ends with a blank
-            // line (unless meta already supplied its trailing separator).
+        } else if self.tty && message.body.is_some() {
+            // On a terminal, a message whose body section was selected
+            // ends with a blank line — even when the body was empty —
+            // unless meta already supplied its trailing separator.
+            let _ = printed_bytes;
             self.write(b"\n\n");
         }
 
@@ -913,9 +915,11 @@ fn transport_failure(
         TransportError::Protocol(message) => {
             Failure::runtime("ConnectionError", format!("{message}{suffix}"))
         }
-        TransportError::TooManyHeaders(count) => Failure::runtime(
+        TransportError::TooManyHeaders(limit) => Failure::runtime(
             "ConnectionError",
-            format!("got more than {count} headers{suffix}"),
+            format!(
+                "('Connection aborted.', HTTPException('got more than {limit} headers')){suffix}"
+            ),
         ),
         TransportError::Proxy(inner) => match *inner {
             // Resolver and timeout failures on the proxy hop read exactly
