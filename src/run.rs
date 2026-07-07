@@ -1290,6 +1290,27 @@ fn execute_online(
 
     let mut hops: i64 = 0;
     loop {
+        // Only http/https reach the wire; any other scheme (ftp, file,
+        // mailto, data, …) — as typed or arrived at via a redirect — is
+        // rejected the way the reference rejects a missing adapter, before
+        // any connection is attempted.
+        if !matches!(current.url.scheme(), "http" | "https") {
+            return Err(Failure::runtime(
+                "InvalidSchema",
+                format!(
+                    "No connection adapters were found for '{}'",
+                    current.url.as_str()
+                ),
+            ));
+        }
+        // A hostless http(s) URL (e.g. a `http:///path` redirect target)
+        // would panic the transport's host expectation; reject it first.
+        if current.url.host_str().is_none() {
+            return Err(Failure::runtime(
+                "InvalidURL",
+                format!("Invalid URL '{}': No host supplied", current.url.as_str()),
+            ));
+        }
         // The proxy route follows the current hop's URL (a redirect may
         // change the scheme or leave a no_proxy host).
         options.proxy =
