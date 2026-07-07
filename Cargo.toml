@@ -31,6 +31,8 @@ path = "src/bin/furl-manager.rs"
 base64 = "0.22.1"
 # WHATWG-registry text encodings: response decoding and label validation.
 encoding_rs = "0.8"
+# Charset detection for undeclared non-UTF-8 text bodies.
+chardetng = "0.1"
 flate2 = "1.1.9"
 # Interrupt handling: a newline on stderr then exit 130.
 ctrlc = "3.5"

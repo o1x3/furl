@@ -467,6 +467,12 @@ fn execute(
         options: crate::output::format::FormatOptions::from_occurrences(&args.format_options)
             .map_err(Failure::Usage)?,
         explicit_json: args.request_type == Some(crate::cli::args::RequestType::Json),
+        // The text pipeline runs on a terminal or under any prettifying;
+        // raw piped output stays byte-exact.
+        encoded: format_tty || mode != crate::output::format::PrettyMode::None,
+        terminal: format_tty,
+        stream: args.stream,
+        response_charset: args.response_charset.clone(),
         response_mime: args.response_mime.clone(),
         style,
     };
@@ -491,8 +497,15 @@ fn execute(
         if parts.body {
             if let Some(body) = &request.body {
                 let content_type = request.headers.get("Content-Type").map(str::to_string);
-                rendered
-                    .extend_from_slice(&format.body(body.bytes.clone(), content_type.as_deref()));
+                match format.body(body.bytes.clone(), content_type.as_deref(), false) {
+                    RenderedBody::Bytes(bytes) => rendered.extend_from_slice(&bytes),
+                    RenderedBody::SuppressedBinary => {
+                        if parts.headers {
+                            rendered.push(b'\n');
+                        }
+                        rendered.extend_from_slice(BINARY_NOTICE);
+                    }
+                }
             }
         }
         let stdout = std::io::stdout();
@@ -531,7 +544,9 @@ fn execute(
     execute_online(args, reporter, request, format, &items, session_state)
 }
 
-const BINARY_NOTICE: &[u8] = b"+-----------------------------------------+\n\
+// A leading newline is part of the notice itself; the head section adds
+// one more when it printed.
+const BINARY_NOTICE: &[u8] = b"\n+-----------------------------------------+\n\
       | NOTE: binary data not shown in terminal |\n\
       +-----------------------------------------+";
 
@@ -549,7 +564,7 @@ enum Sink {
 struct Message {
     head: Option<String>,
     /// `Some` when the body section is selected (bytes may be empty).
-    body: Option<Vec<u8>>,
+    body: Option<RenderedBody>,
     /// `Some(elapsed_text)` when the meta section is selected.
     meta: Option<String>,
 }
@@ -630,18 +645,19 @@ impl Emitter {
         }
 
         let mut printed_bytes = false;
-        if let Some(body) = &message.body {
-            if !body.is_empty() {
-                if self.tty && body.contains(&0) {
-                    if message.head.is_some() {
-                        self.write(b"\n");
-                    }
-                    self.write(BINARY_NOTICE);
-                } else {
-                    self.write(body);
+        match &message.body {
+            Some(RenderedBody::SuppressedBinary) => {
+                if message.head.is_some() {
+                    self.write(b"\n");
                 }
+                self.write(BINARY_NOTICE);
                 printed_bytes = true;
             }
+            Some(RenderedBody::Bytes(bytes)) if !bytes.is_empty() => {
+                self.write(bytes);
+                printed_bytes = true;
+            }
+            _ => {}
         }
 
         if let Some(meta) = &message.meta {
@@ -1038,9 +1054,26 @@ struct FormatContext {
     options: crate::output::format::FormatOptions,
     explicit_json: bool,
     response_mime: Option<String>,
+    /// `--response-charset`: forces the response-body text encoding.
+    response_charset: Option<String>,
     /// The resolved color style (from `--style` + terminal depth). `None`
     /// when the colors group is inactive or the terminal has no color.
     style: Option<crate::output::color::Style>,
+    /// The text pipeline runs (terminal output or any prettifying);
+    /// otherwise bodies pass through raw.
+    encoded: bool,
+    /// Output lands on a terminal: re-encode decoded text as UTF-8
+    /// instead of the body's own declared encoding.
+    terminal: bool,
+    /// `--stream`: prettified bodies process line by line.
+    stream: bool,
+}
+
+/// A body section after formatting: printable bytes, or the binary
+/// notice.
+enum RenderedBody {
+    Bytes(Vec<u8>),
+    SuppressedBinary,
 }
 
 impl FormatContext {
@@ -1077,17 +1110,58 @@ impl FormatContext {
 
     /// Reformat and then highlight a body, decoding lossily for the
     /// processors and re-encoding to bytes.
-    fn body(&self, bytes: Vec<u8>, content_type: Option<&str>) -> Vec<u8> {
-        if !self.format_active() && !self.colors_active() {
-            return bytes;
+    fn body(&self, bytes: Vec<u8>, content_type: Option<&str>, is_response: bool) -> RenderedBody {
+        // Raw path: piped with no prettifying — bytes pass untouched.
+        if !self.encoded {
+            return RenderedBody::Bytes(bytes);
         }
-        let text = String::from_utf8_lossy(&bytes);
-        let mime =
-            crate::output::format::effective_mime(content_type, self.response_mime.as_deref());
+        // The text pipeline suppresses binary bodies wholesale.
+        if bytes.contains(&0) {
+            return RenderedBody::SuppressedBinary;
+        }
+        let declared = crate::output::format::charset_from_content_type(content_type);
+        let source = if is_response {
+            self.response_charset.as_deref().or(declared.as_deref())
+        } else {
+            declared.as_deref()
+        };
+        let text = crate::encoding::decode_body(&bytes, source);
+        let mime = crate::output::format::effective_mime(
+            content_type,
+            if is_response {
+                self.response_mime.as_deref()
+            } else {
+                None
+            },
+        );
+        let processed = if self.stream && (self.format_active() || self.colors_active()) {
+            // --stream: each line runs the pipeline on its own.
+            let mut out = String::new();
+            for segment in text.split_inclusive('\n') {
+                let (line, newline) = match segment.strip_suffix('\n') {
+                    Some(line) => (line, "\n"),
+                    None => (segment, ""),
+                };
+                out.push_str(&self.process_text(line, mime.as_deref()));
+                out.push_str(newline);
+            }
+            out
+        } else {
+            self.process_text(&text, mime.as_deref())
+        };
+        RenderedBody::Bytes(crate::encoding::encode_body(
+            &processed,
+            declared.as_deref(),
+            self.terminal,
+        ))
+    }
+
+    /// The format group then the colors group, over decoded text.
+    fn process_text(&self, text: &str, mime: Option<&str>) -> String {
         let formatted = if self.format_active() {
             crate::output::format::format_body(
-                &text,
-                mime.as_deref(),
+                text,
+                mime,
                 self.explicit_json,
                 &self.options,
                 self.mode,
@@ -1097,9 +1171,9 @@ impl FormatContext {
         };
         match &self.style {
             Some(style) if self.colors_active() => {
-                crate::output::color::colorize_body(&formatted, mime.as_deref(), style).into_bytes()
+                crate::output::color::colorize_body(&formatted, mime, style)
             }
-            _ => formatted.into_bytes(),
+            _ => formatted,
         }
     }
 
@@ -1292,7 +1366,7 @@ fn execute_online(
                     .as_ref()
                     .map(|b| b.bytes.clone())
                     .unwrap_or_default();
-                format.body(bytes, request_content_type.as_deref())
+                format.body(bytes, request_content_type.as_deref(), false)
             }),
             meta: None,
         });
@@ -1309,14 +1383,20 @@ fn execute_online(
                     let body = format.body(
                         transport::decoded_body(&response),
                         response_content_type.as_deref(),
+                        true,
                     );
                     // A HEAD response has no body, but the reference still
                     // runs its empty body through the colorizer, which
                     // emits a lone newline.
-                    if body.is_empty() && current.method == "HEAD" && format.colors_active() {
-                        b"\n".to_vec()
-                    } else {
-                        body
+                    match body {
+                        RenderedBody::Bytes(bytes)
+                            if bytes.is_empty()
+                                && current.method == "HEAD"
+                                && format.colors_active() =>
+                        {
+                            RenderedBody::Bytes(b"\n".to_vec())
+                        }
+                        other => other,
                     }
                 }),
                 meta: letters

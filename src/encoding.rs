@@ -21,8 +21,51 @@ pub fn lookup(label: &str) -> Option<&'static encoding_rs::Encoding> {
             normalized
                 .strip_suffix("-be")
                 .map(|stem| format!("{stem}be"))
-        })?;
-    encoding_rs::Encoding::for_label(squashed.as_bytes())
+        });
+    if let Some(encoding) =
+        squashed.and_then(|label| encoding_rs::Encoding::for_label(label.as_bytes()))
+    {
+        return Some(encoding);
+    }
+    // Hyphen-free aliases: "latin-1" for the registry's "latin1".
+    let dehyphenated = normalized.replace('-', "");
+    encoding_rs::Encoding::for_label(dehyphenated.as_bytes())
+}
+
+/// Detection only fires for bodies past this size; shorter ones assume
+/// UTF-8 (guessing tiny inputs produces confusing results).
+const DETECTION_MINIMUM: usize = 32;
+
+/// Decode body bytes for the text pipeline: the given label when one is
+/// declared (or forced), valid UTF-8 as itself, then a detector guess for
+/// longer non-UTF-8 bodies. Malformed sequences become U+FFFD.
+pub fn decode_body(bytes: &[u8], label: Option<&str>) -> String {
+    if let Some(encoding) = label.and_then(lookup) {
+        return encoding.decode(bytes).0.into_owned();
+    }
+    match std::str::from_utf8(bytes) {
+        Ok(text) => text.to_string(),
+        Err(_) if bytes.len() > DETECTION_MINIMUM => {
+            let mut detector = chardetng::EncodingDetector::new();
+            detector.feed(bytes, true);
+            let encoding = detector.guess(None, true);
+            encoding.decode(bytes).0.into_owned()
+        }
+        Err(_) => String::from_utf8_lossy(bytes).into_owned(),
+    }
+}
+
+/// Encode pipeline text for the output target: a terminal always gets
+/// UTF-8; a pipe gets the message's own declared encoding (UTF-8 when
+/// none resolves), so unformatted foreign-charset bodies round-trip.
+pub fn encode_body(text: &str, declared: Option<&str>, terminal: bool) -> Vec<u8> {
+    if terminal {
+        return text.as_bytes().to_vec();
+    }
+    match declared.and_then(lookup) {
+        Some(encoding) => encoding.encode(text).0.into_owned(),
+        None => text.as_bytes().to_vec(),
+    }
 }
 
 #[cfg(test)]

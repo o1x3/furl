@@ -284,6 +284,26 @@ pub fn effective_mime(
     if media.is_empty() { None } else { Some(media) }
 }
 
+/// The `charset` parameter of a Content-Type header, unquoted and
+/// trimmed (the declared text encoding of the message body). With
+/// duplicate parameters the last one wins.
+pub fn charset_from_content_type(content_type: Option<&str>) -> Option<String> {
+    let raw = content_type?;
+    let mut charset = None;
+    for parameter in raw.split(';').skip(1) {
+        let Some((key, value)) = parameter.split_once('=') else {
+            continue;
+        };
+        if key.trim().eq_ignore_ascii_case("charset") {
+            let value = value.trim().trim_matches('"').trim_matches('\'');
+            if !value.is_empty() {
+                charset = Some(value.to_string());
+            }
+        }
+    }
+    charset
+}
+
 /// Does a media type look like a syntactically valid `type/subtype`? Body
 /// formatters only run against valid mimes (§5); otherwise the body passes
 /// through untouched. This mirrors the reference's `^[^/]+/[^/]+$` check.
