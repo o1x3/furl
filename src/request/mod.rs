@@ -122,6 +122,15 @@ pub fn build(context: &BuildContext<'_>) -> Result<PreparedRequest, BuildError> 
 
     // -- URL ------------------------------------------------------------
     let normalized = normalize_url(&args.url, context.default_scheme);
+    // The URL parser leniently treats `scheme:///path` as host `path`;
+    // an empty authority is really a missing host, as the reference
+    // reports. Catch it from the normalized string before parsing.
+    if authority_is_empty(&normalized) {
+        return Err(BuildError::InvalidUrl {
+            url: normalized.clone(),
+            reason: "No host supplied".to_string(),
+        });
+    }
     let mut url = url::Url::parse(&normalized).map_err(|error| BuildError::InvalidUrl {
         url: normalized.clone(),
         reason: url_error_reason(error),
@@ -461,6 +470,22 @@ fn percent_decode(bytes: &[u8]) -> Vec<u8> {
 }
 
 /// The authority component as typed: userinfo stripped, port kept.
+/// Does the normalized URL's authority (between `://` and the next
+/// `/`, `?`, or `#`) come out empty? Such a URL has no host even though
+/// the lenient parser would invent one from the following path segment.
+fn authority_is_empty(normalized_url: &str) -> bool {
+    let Some(after_scheme) = normalized_url
+        .find("://")
+        .map(|at| &normalized_url[at + 3..])
+    else {
+        return false;
+    };
+    let authority_end = after_scheme
+        .find(['/', '?', '#'])
+        .unwrap_or(after_scheme.len());
+    after_scheme[..authority_end].is_empty()
+}
+
 /// The `Host`-header authority: the parsed host (IDNA-encoded and
 /// lowercased by the URL parser, IPv6 kept bracketed) plus the port
 /// exactly as typed — an explicit port survives even when it is the
