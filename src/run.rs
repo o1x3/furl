@@ -171,6 +171,12 @@ fn stderr_colors(style: &str) -> Option<(&'static str, &'static str)> {
 /// A failure on the way to (or during) the request.
 enum Failure {
     Usage(String),
+    /// A usage error tied to a specific option (its name leads the usage
+    /// line, `argument …:`-style).
+    UsageOption {
+        option: &'static crate::cli::options::OptionSpec,
+        message: String,
+    },
     Runtime {
         /// The error-kind prefix (`ConnectionError: …`); bare messages
         /// (timeouts, redirect limits) carry none.
@@ -205,6 +211,13 @@ fn report_failure(reporter: &Reporter, failure: Failure) -> i32 {
             let error = UsageError {
                 message,
                 option: None,
+            };
+            exit_usage(&reporter.program, &error, 1)
+        }
+        Failure::UsageOption { option, message } => {
+            let error = UsageError {
+                message,
+                option: Some(option),
             };
             exit_usage(&reporter.program, &error, 1)
         }
@@ -318,6 +331,30 @@ fn execute(
         return Err(Failure::Usage(
             "--continue requires --output to be specified".to_string(),
         ));
+    }
+
+    // --output is opened up front (as the reference does): a path that
+    // cannot be opened is a usage error, not a mid-request failure. The
+    // resume path keeps the file's contents; otherwise it is truncated
+    // when the response arrives.
+    if let Some(path) = &args.output {
+        let mut open = std::fs::OpenOptions::new();
+        open.read(true).write(true).create(true);
+        if !args.download_resume {
+            open.truncate(false);
+        }
+        if let Err(error) = open.open(crate::paths::expand_tilde(path)) {
+            let spec =
+                crate::cli::options::find_exact("--output").expect("--output is a known option");
+            return Err(Failure::UsageOption {
+                option: spec,
+                message: format!(
+                    "argument {}: can't open '{path}': {}",
+                    spec.display_name(),
+                    crate::errors::file_error(path, &error)
+                ),
+            });
+        }
     }
 
     // Print parts: validated even where not yet consumed.
