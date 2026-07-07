@@ -99,7 +99,11 @@ fn dispatch(argv: &[String]) -> Result<String, ManagerError> {
     {
         return Ok(MANAGER_HELP.to_string());
     }
-    if argv.iter().any(|a| a == "--version") {
+    if argv
+        .iter()
+        .take_while(|a| !matches!(a.as_str(), "cli" | "plugins"))
+        .any(|a| a == "--version")
+    {
         return Ok(format!("{}\n", crate::VERSION));
     }
     match argv.first().map(String::as_str) {
