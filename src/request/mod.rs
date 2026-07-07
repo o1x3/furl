@@ -433,46 +433,6 @@ fn requote(component: &str, query: bool) -> String {
     out
 }
 
-#[allow(dead_code)]
-fn unquote_unreserved(text: &str) -> String {
-    let bytes = text.as_bytes();
-    let mut has_malformed = false;
-    let mut out = String::with_capacity(text.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%' {
-            let decoded = bytes.get(i + 1..i + 3).and_then(|hex| {
-                let hi = (hex[0] as char).to_digit(16)?;
-                let lo = (hex[1] as char).to_digit(16)?;
-                Some((hi * 16 + lo) as u8)
-            });
-            match decoded {
-                Some(byte)
-                    if byte.is_ascii_alphanumeric()
-                        || matches!(byte, b'-' | b'.' | b'_' | b'~') =>
-                {
-                    out.push(byte as char);
-                    i += 3;
-                }
-                Some(_) => {
-                    out.push_str(&text[i..i + 3]);
-                    i += 3;
-                }
-                None => {
-                    has_malformed = true;
-                    break;
-                }
-            }
-        } else {
-            // Advance one full character (the text is valid UTF-8).
-            let c = text[i..].chars().next().expect("in-bounds char");
-            out.push(c);
-            i += c.len_utf8();
-        }
-    }
-    if has_malformed { text.to_string() } else { out }
-}
-
 /// Decode percent escapes; malformed escapes stay literal.
 fn percent_decode(bytes: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(bytes.len());

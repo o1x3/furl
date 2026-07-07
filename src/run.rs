@@ -367,6 +367,11 @@ fn execute(
             }
         })?;
 
+    // Reject header names/values that carry reserved or return characters
+    // before they can reach the wire (header injection). Values are
+    // validated after the same surrounding-whitespace strip the wire uses.
+    validate_headers(&items)?;
+
     // -- Auth password prompt ------------------------------------------------
     let auth_type = args.auth_type.as_deref().unwrap_or("basic");
     if let Some(auth) = args.auth.clone() {
@@ -758,6 +763,47 @@ fn resolve_tls(args: &ParsedArgs) -> tls::TlsOptions {
         ciphers: args.ciphers.clone(),
         cert_key_pass,
     }
+}
+
+/// Reject any header item whose name or (stripped) value contains
+/// leading whitespace, a reserved character, or a return character —
+/// mirroring the reference's validation and its `InvalidHeader` message
+/// with the offending part shown Python-style (name as `str`, value as
+/// `bytes`).
+fn validate_headers(items: &RequestItems) -> Result<(), Failure> {
+    const INVALID: &str =
+        "Invalid leading whitespace, reserved character(s), or return character(s) in header";
+    for header in &items.headers {
+        // Name: first character neither `:` nor whitespace, and no `:`,
+        // CR, or LF anywhere.
+        let name = &header.name;
+        let name_ok = name
+            .chars()
+            .next()
+            .is_some_and(|c| c != ':' && !c.is_whitespace())
+            && !name.contains([':', '\r', '\n']);
+        if !name_ok {
+            return Err(Failure::runtime(
+                "InvalidHeader",
+                format!("{INVALID} name: {}", crate::errors::py_str_repr(name)),
+            ));
+        }
+        // Value: validated after the same whitespace strip the wire
+        // applies; an empty value passes, otherwise no CR/LF may remain.
+        if let Some(value) = &header.value {
+            let stripped = value.trim_matches(|c: char| c.is_ascii_whitespace());
+            if !stripped.is_empty() && stripped.contains(['\r', '\n']) {
+                return Err(Failure::runtime(
+                    "InvalidHeader",
+                    format!(
+                        "{INVALID} value: {}",
+                        crate::errors::py_bytes_repr(stripped.as_bytes())
+                    ),
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// An unusable proxy URL, before any connection is attempted.

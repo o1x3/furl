@@ -89,6 +89,77 @@ pub fn os_error_parts(error: &std::io::Error) -> (i32, String) {
     }
 }
 
+/// Render bytes the way Python's `repr(bytes)` does: `b'…'`, with
+/// `\t\n\r\\` and the quote escaped, printable ASCII shown literally, and
+/// every other byte as `\xHH`. Quote choice matches Python: single quotes
+/// unless the content has a `'` and no `"`.
+pub fn py_bytes_repr(bytes: &[u8]) -> String {
+    let quote = pick_quote(bytes.iter().copied());
+    let mut out = String::with_capacity(bytes.len() + 3);
+    out.push('b');
+    out.push(quote);
+    for &byte in bytes {
+        push_repr_byte(&mut out, byte, quote);
+    }
+    out.push(quote);
+    out
+}
+
+/// Render a string the way Python's `repr(str)` does for the ASCII range
+/// (printable non-ASCII passes through; control bytes escape). Adequate
+/// for header names, which are ASCII in practice.
+pub fn py_str_repr(text: &str) -> String {
+    let quote = pick_quote(text.bytes());
+    let mut out = String::with_capacity(text.len() + 2);
+    out.push(quote);
+    for ch in text.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '\t' => out.push_str("\\t"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            c if c == quote => {
+                out.push('\\');
+                out.push(quote);
+            }
+            c if (c as u32) < 0x20 || (c as u32) == 0x7f => {
+                out.push_str(&format!("\\x{:02x}", c as u32));
+            }
+            c => out.push(c),
+        }
+    }
+    out.push(quote);
+    out
+}
+
+fn pick_quote(mut bytes: impl Iterator<Item = u8>) -> char {
+    let mut has_single = false;
+    let mut has_double = false;
+    for byte in bytes.by_ref() {
+        if byte == b'\'' {
+            has_single = true;
+        } else if byte == b'"' {
+            has_double = true;
+        }
+    }
+    if has_single && !has_double { '"' } else { '\'' }
+}
+
+fn push_repr_byte(out: &mut String, byte: u8, quote: char) {
+    match byte {
+        b'\\' => out.push_str("\\\\"),
+        b'\t' => out.push_str("\\t"),
+        b'\n' => out.push_str("\\n"),
+        b'\r' => out.push_str("\\r"),
+        b if b == quote as u8 => {
+            out.push('\\');
+            out.push(quote);
+        }
+        0x20..=0x7e => out.push(byte as char),
+        b => out.push_str(&format!("\\x{b:02x}")),
+    }
+}
+
 /// The three-block usage error: usage line, message, help pointer.
 ///
 /// When the error came from a specific option, that option is shown in
@@ -116,6 +187,20 @@ pub fn usage_error_block(program: &str, message: &str, option: Option<&OptionSpe
 mod tests {
     use super::*;
     use crate::cli::options::find_exact;
+
+    #[test]
+    fn py_repr_matches_python() {
+        assert_eq!(py_str_repr(""), "''");
+        assert_eq!(py_str_repr(" X"), "' X'");
+        assert_eq!(py_str_repr("X\rY"), "'X\\rY'");
+        // A single quote with no double quote flips to double quotes.
+        assert_eq!(py_str_repr("a'b"), "\"a'b\"");
+        assert_eq!(py_str_repr("a\"b"), "'a\"b'");
+        assert_eq!(py_str_repr("a'\"b"), "'a\\'\"b'");
+        assert_eq!(py_bytes_repr(b"a\r\nEvil: 1"), "b'a\\r\\nEvil: 1'");
+        assert_eq!(py_bytes_repr(b"a'b"), "b\"a'b\"");
+        assert_eq!(py_bytes_repr(&[0x00, 0x7f, 0x80]), "b'\\x00\\x7f\\x80'");
+    }
 
     #[test]
     fn log_block_frames_with_blank_lines() {
