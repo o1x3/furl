@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-07-08
+
+Follow-up parity fixes from a second red-team pass.
+
+### Fixed
+
+- A missing `-a` password is read from piped stdin (its first line), matching
+  the reference's getpass fallback; a terminal still prompts.
+- File-access and URL-parse errors match the reference wording
+  (`[Errno N] {strerror}: '{path}'` and `Failed to parse: <url>`).
+- `--output` to an unopenable path fails up front as an
+  `argument -o/--output: can't open …` usage error instead of a mid-request
+  IOError.
+
 ## [0.2.0] - 2026-07-07
 
 A parity and hardening release: previously parsed-but-inert options are now

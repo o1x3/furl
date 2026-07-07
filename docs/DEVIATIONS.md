@@ -59,6 +59,12 @@ furl corrects a handful of long-standing edge-case behaviors:
   reference's for uncommon or ambiguous content types.
 - **ASCII punctuation in messages.** A few messages that used non-ASCII
   apostrophes now use plain ASCII.
+- **Argument-parser message cosmetics.** A handful of parser-error details
+  reflect furl's own conventions rather than a specific argparse version:
+  invalid-choice values are quoted, an option's aliases render long-first in
+  the usage line, and `furl-manager` shows a "did you mean to send a request?"
+  hint for an unrecognized top-level command. The errors carry the same
+  information and exit status.
 - **Authorization header wire order.** When credentials are supplied *and* a
   raw `Authorization:` header is also given (an unusual combination), the
   computed `Authorization` header may appear in a slightly different position
