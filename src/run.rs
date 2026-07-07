@@ -1084,7 +1084,9 @@ fn rebuild_for_redirect(
         .headers
         .entries
         .retain(|(name, _)| !name.eq_ignore_ascii_case("cookie"));
-    if let Some(value) = jar.header_for(request.url.scheme(), &host, request.url.path()) {
+    if let Some(value) =
+        jar.header_for(request.url.scheme(), &host, request.url.path(), now_epoch())
+    {
         request.headers.entries.push(("Cookie".to_string(), value));
     }
 
@@ -1313,6 +1315,7 @@ fn execute_online(
         current.url.scheme(),
         current.url.host_str().unwrap_or_default(),
         current.url.path(),
+        now_epoch(),
     ) {
         current
             .headers
@@ -1380,9 +1383,15 @@ fn execute_online(
         let elapsed = started_at.elapsed();
 
         let host = current.url.host_str().unwrap_or_default().to_string();
+        let request_path = current.url.path().to_string();
         for (name, value) in &response.headers {
             if name.eq_ignore_ascii_case("set-cookie") {
-                jar.store(&host, &String::from_utf8_lossy(value));
+                jar.store(
+                    &host,
+                    &request_path,
+                    &String::from_utf8_lossy(value),
+                    now_epoch(),
+                );
             }
         }
 

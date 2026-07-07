@@ -1350,7 +1350,7 @@ mod tests {
         let mut jar = Jar::new();
         session.load_into_jar(&mut jar);
         assert_eq!(
-            jar.header_for("http", "h.example", "/"),
+            jar.header_for("http", "h.example", "/", 0),
             Some("sid=abc".into())
         );
     }
