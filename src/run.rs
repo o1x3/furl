@@ -389,6 +389,10 @@ fn execute(
     validate_headers(&items)?;
 
     // -- Auth password prompt ------------------------------------------------
+    // A missing password is sourced from the terminal, or — when stdin is a
+    // pipe — from its first line (which then consumes stdin, leaving no
+    // body), mirroring the reference's getpass fallback.
+    let mut password_took_stdin = false;
     let auth_type = args.auth_type.as_deref().unwrap_or("basic");
     if let Some(auth) = args.auth.clone() {
         if matches!(auth_type, "basic" | "digest") {
@@ -399,10 +403,22 @@ fn execute(
                         "Unable to prompt for passwords because --ignore-stdin is set.".to_string(),
                     ));
                 }
-                let host =
-                    crate::request::host_for_prompt(&args.url, default_scheme(program, args));
-                let prompt = format!("{program_name}: password for {user}@{host}: ");
-                let password = rpassword::prompt_password(prompt).unwrap_or_default();
+                let password = if stdin_available {
+                    password_took_stdin = true;
+                    let bytes = read_stdin_body(args.offline, args.quiet > 0)
+                        .map_err(|error| Failure::runtime("IOError", error.to_string()))?;
+                    let text = String::from_utf8_lossy(&bytes);
+                    text.split('\n')
+                        .next()
+                        .unwrap_or("")
+                        .trim_end_matches('\r')
+                        .to_string()
+                } else {
+                    let host =
+                        crate::request::host_for_prompt(&args.url, default_scheme(program, args));
+                    let prompt = format!("{program_name}: password for {user}@{host}: ");
+                    rpassword::prompt_password(prompt).unwrap_or_default()
+                };
                 // The split takes the first colon, so a password with
                 // colons survives the round-trip verbatim.
                 args.auth = Some(format!("{user}:{password}"));
@@ -413,8 +429,9 @@ fn execute(
     // -- Body from stdin -----------------------------------------------------
     // Available stdin always counts as a body source — even empty — so
     // conflicts with --raw and data items surface, and an empty piped
-    // body still triggers data-driven defaults.
-    let stdin_body = if stdin_available {
+    // body still triggers data-driven defaults. When the password already
+    // consumed stdin, there is no body left to read.
+    let stdin_body = if stdin_available && !password_took_stdin {
         let bytes = read_stdin_body(args.offline, args.quiet > 0)
             .map_err(|error| Failure::runtime("IOError", error.to_string()))?;
         Some(bytes)
