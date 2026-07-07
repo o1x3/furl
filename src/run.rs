@@ -319,13 +319,22 @@ fn execute(
         ("--history-print", args.history_print.as_deref()),
     ] {
         if let Some(letters) = value {
-            let bad: String = letters
+            // Report only the unknown letters, de-duplicated and sorted,
+            // as the reference does.
+            let mut bad: Vec<char> = letters
                 .chars()
                 .filter(|c| !PRINT_LETTERS.contains(*c))
                 .collect();
+            bad.sort_unstable();
+            bad.dedup();
             if !bad.is_empty() {
+                let joined = bad
+                    .iter()
+                    .map(|c| c.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",");
                 return Err(Failure::Usage(format!(
-                    "Unknown output options: {flag}={letters}"
+                    "Unknown output options: {flag}={joined}"
                 )));
             }
         }

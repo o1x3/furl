@@ -68,8 +68,37 @@ impl ManagerError {
     }
 }
 
+const MANAGER_HELP: &str = "\
+usage: furl-manager [-h] [--debug] [--traceback] [--version] {cli,plugins} ...
+
+Managing interface for furl itself. <https://github.com/o1x3/furl> Be aware
+that you might be looking for furl/furls commands for sending HTTP requests.
+This command is only available for managing furl and the configuration around
+it.
+
+positional arguments:
+  {cli,plugins}
+
+options:
+  -h, --help     show this help message and exit
+  --debug        Prints the exception traceback should one occur, as well as
+                 other information useful for debugging furl itself and for
+                 reporting bugs.
+  --traceback    Prints the exception traceback should one occur.
+  --version      Show version and exit.
+";
+
 /// Route the manager argv to a handler, returning stdout text or an error.
 fn dispatch(argv: &[String]) -> Result<String, ManagerError> {
+    // A top-level help flag (before any subcommand) prints usage and exits
+    // successfully.
+    if argv
+        .iter()
+        .take_while(|a| !matches!(a.as_str(), "cli" | "plugins"))
+        .any(|a| a == "-h" || a == "--help")
+    {
+        return Ok(MANAGER_HELP.to_string());
+    }
     if argv.iter().any(|a| a == "--version") {
         return Ok(format!("{}\n", crate::VERSION));
     }
