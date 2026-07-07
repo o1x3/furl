@@ -7,6 +7,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-07-07
+
+A parity and hardening release: previously parsed-but-inert options are now
+wired, the error/output surface matches the reference more closely, and a
+differential audit surfaced and fixed several correctness and robustness bugs.
+
+### Added
+
+- **Proxies.** `--proxy` and the `*_proxy` / `no_proxy` environment variables
+  route requests: plain-`http` targets use absolute-form with
+  `Proxy-Authorization`, `https` targets tunnel through `CONNECT` (including
+  TLS-in-TLS for `https` proxies). `no_proxy` supports exact, dot-suffix, CIDR,
+  and `*` matching.
+- **`--ciphers`** filters the TLS cipher suites (rustls/IANA names) and
+  **`--cert-key-pass`** decrypts PKCS#8-encrypted client keys, prompting on the
+  terminal when the passphrase is not supplied.
+- **`furl-manager cli sessions upgrade` / `upgrade-all`** migrate legacy
+  dict-layout cookies and headers to the current list layout.
+- **`furl-manager --help` / `-h`** prints usage.
+- Byte-exact rendering for every named 256-color style; `--style` now rejects
+  unknown names.
+- Response-charset handling (`--response-charset`, declared charset, detection),
+  `--stream` line-by-line processing, and binary-body suppression across the
+  whole text pipeline.
+- Framed stderr log blocks with per-line coloring and quiet suppression, a
+  slow-stdin read warning, `SIGINT` → 130, and broken-pipe handling.
+
+### Fixed
+
+- **Do not panic or hang on non-`http(s)` schemes.** A `ftp://`, `file://`,
+  `mailto:`, or `data:` target — or a redirect to one — now errors with
+  `InvalidSchema` instead of hanging or panicking.
+- **Reject header injection.** Header names/values containing CR/LF, reserved
+  characters, or leading whitespace are rejected before any connection.
+- **IPv6 and IDN hosts.** Bracketed IPv6 literals resolve correctly and
+  non-ASCII hosts are IDNA-encoded in the `Host` header.
+- **URL requoting** matches the reference wire form (unsafe characters encoded,
+  escapes normalized, lone `%` escaped); an empty authority is rejected as a
+  missing host.
+- **Redirects** rewrite all non-`HEAD` methods to `GET` on 302/303 and purge the
+  body and framing headers for every redirect except 307/308.
+- **Cookies** honor `Max-Age`/`Expires` (expired cookies are deleted and never
+  sent) and default to the request path's directory.
+- URL-userinfo credentials go into Basic auth verbatim; multipart parameter
+  names/filenames escape `"`, CR, and LF; the `--max-headers`, `--continue`,
+  and `--print` error messages, the terminal trailing blank line, and the
+  connection-error chains match the reference.
+
 ## [0.1.0] - 2026-07-07
 
 Initial release.
