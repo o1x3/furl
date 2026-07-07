@@ -5,6 +5,7 @@
 //! that dynamic plugin loading is unavailable (a documented deviation).
 
 mod export_args;
+mod sessions;
 
 #[cfg(test)]
 mod tests;
@@ -118,9 +119,8 @@ fn dispatch_sessions(argv: &[String]) -> Result<String, ManagerError> {
         None => Err(ManagerError::new(
             "Please specify one of these: 'upgrade', 'upgrade-all'",
         )),
-        Some("upgrade") | Some("upgrade-all") => Err(ManagerError::new(
-            "Session upgrades are not yet implemented in this release.",
-        )),
+        Some("upgrade") => sessions::upgrade(&argv[1..]),
+        Some("upgrade-all") => sessions::upgrade_all(&argv[1..]),
         Some(other) => Err(ManagerError::new(format!(
             "argument COMMAND: invalid choice: '{other}' \
              (choose from 'upgrade', 'upgrade-all')"

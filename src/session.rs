@@ -388,6 +388,52 @@ impl Session {
         self.auth = Some(auth);
     }
 
+    /// Whether the file on disk used a pre-list dict layout for `cookies`
+    /// or `headers` — i.e. whether `furl-manager cli sessions upgrade` has
+    /// any work to do. This gates on the *detected layout*, not the stored
+    /// version stamp: furl stamps its own versions, so comparing them
+    /// against another program's fixer versions would be meaningless.
+    pub fn needs_upgrade(&self) -> bool {
+        self.cookies_dict_layout || self.headers_dict_layout
+    }
+
+    /// Migrate the pre-list dict layouts to the modern list layouts, in
+    /// place. Used only by the explicit upgrade command — a plain run never
+    /// migrates a file (see the module docs).
+    ///
+    /// Cookies leave the dict layout as `{name, value, domain, path,
+    /// expires, secure}` records. A dict-layout cookie with an empty (or
+    /// null) domain is either bound to `bind_host` (`--bind-cookies`) or
+    /// marked explicit-none so it serializes as `"domain": null` — the
+    /// modern spelling of "not bound to any host". List-layout cookies are
+    /// never touched. Headers move from a name→value map to `{name, value}`
+    /// records. The legacy flag is cleared, so the rewritten file loads
+    /// without warnings.
+    pub fn upgrade_layout(&mut self, bind_host: Option<&str>) {
+        if self.cookies_dict_layout {
+            self.cookies_dict_layout = false;
+            for cookie in &mut self.cookies {
+                if cookie.domain.is_empty() {
+                    match bind_host {
+                        Some(host) => {
+                            cookie.domain = host.to_string();
+                            cookie.explicit_none_domain = false;
+                        }
+                        None => cookie.explicit_none_domain = true,
+                    }
+                }
+            }
+        }
+        self.headers_dict_layout = false;
+        self.legacy = None;
+    }
+
+    /// Stamp the current program version into `__meta__` on the next save,
+    /// replacing any older stored stamp (a plain save preserves it).
+    pub fn bump_version(&mut self) {
+        self.stored_version = Some(crate::VERSION.to_string());
+    }
+
     /// Recompute the stored header set from a request's final outgoing
     /// headers.
     ///
@@ -1012,6 +1058,126 @@ mod tests {
             .unwrap();
         assert!(!warning.contains("upgrade-all"));
         assert!(warning.contains("/tmp/s.json"));
+    }
+
+    // ---- Layout upgrades (furl-manager cli sessions upgrade) -------------
+
+    #[test]
+    fn needs_upgrade_only_for_dict_layouts() {
+        let modern = "{\"cookies\": [], \"headers\": []}";
+        assert!(
+            !Session::from_text(modern, &dummy_path(), 0)
+                .unwrap()
+                .needs_upgrade()
+        );
+        let cookie_dict = "{\"cookies\": {}}";
+        assert!(
+            Session::from_text(cookie_dict, &dummy_path(), 0)
+                .unwrap()
+                .needs_upgrade()
+        );
+        let header_dict = "{\"headers\": {}}";
+        assert!(
+            Session::from_text(header_dict, &dummy_path(), 0)
+                .unwrap()
+                .needs_upgrade()
+        );
+    }
+
+    #[test]
+    fn upgrade_layout_cookie_dict_without_bind_marks_explicit_none() {
+        let source = concat!(
+            "{\"cookies\": {",
+            "\"loose\": {\"value\": \"1\", \"domain\": \"\", ",
+            "\"path\": \"/\", \"expires\": null, \"secure\": false},",
+            "\"bound\": {\"value\": \"2\", \"domain\": \"h.example\", ",
+            "\"path\": \"/\", \"expires\": null, \"secure\": false}}}",
+        );
+        let mut session = Session::from_text(source, &dummy_path(), 0).unwrap();
+        session.upgrade_layout(None);
+        assert!(!session.needs_upgrade());
+        let text = session.to_json();
+        // List layout with the name materialized from the dict key.
+        assert!(text.contains("\"cookies\": ["), "{text}");
+        assert!(text.contains("\"name\": \"loose\""), "{text}");
+        // Domainless becomes explicit-none (null); bound keeps its domain.
+        assert!(text.contains("\"domain\": null"), "{text}");
+        assert!(text.contains("\"domain\": \"h.example\""), "{text}");
+    }
+
+    #[test]
+    fn upgrade_layout_cookie_dict_with_bind_binds_domainless() {
+        // Both an empty-string and a null domain count as domainless.
+        let source = concat!(
+            "{\"cookies\": {",
+            "\"a\": {\"value\": \"1\", \"domain\": \"\", ",
+            "\"path\": \"/\", \"expires\": null, \"secure\": false},",
+            "\"b\": {\"value\": \"2\", \"domain\": null, ",
+            "\"path\": \"/\", \"expires\": null, \"secure\": false}}}",
+        );
+        let mut session = Session::from_text(source, &dummy_path(), 0).unwrap();
+        session.upgrade_layout(Some("h.example"));
+        let text = session.to_json();
+        assert!(!text.contains("\"domain\": null"), "{text}");
+        assert_eq!(
+            text.matches("\"domain\": \"h.example\"").count(),
+            2,
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn upgrade_layout_header_dict_becomes_list() {
+        let source = "{\"headers\": {\"X-Api\": \"v1\"}}";
+        let mut session = Session::from_text(source, &dummy_path(), 0).unwrap();
+        session.upgrade_layout(None);
+        let text = session.to_json();
+        assert!(text.contains("\"headers\": ["), "{text}");
+        assert!(text.contains("\"name\": \"X-Api\""), "{text}");
+        assert!(text.contains("\"value\": \"v1\""), "{text}");
+    }
+
+    #[test]
+    fn upgrade_layout_clears_legacy_warning() {
+        let source = concat!(
+            "{\"headers\": {\"X\": \"v\"},",
+            "\"cookies\": {\"s\": {\"value\": \"1\", \"domain\": \"\", ",
+            "\"path\": \"/\", \"expires\": null, \"secure\": false}}}",
+        );
+        let mut session = Session::from_text(source, &dummy_path(), 0).unwrap();
+        assert!(session.legacy_warning("api", "host", true).is_some());
+        session.upgrade_layout(None);
+        assert!(session.legacy_warning("api", "host", true).is_none());
+        // And the upgraded serialization parses back as fully modern.
+        let reparsed = Session::from_text(&session.to_json(), &dummy_path(), 0).unwrap();
+        assert!(!reparsed.needs_upgrade());
+        assert!(reparsed.legacy_warning("api", "host", true).is_none());
+    }
+
+    #[test]
+    fn upgrade_layout_leaves_list_layout_cookies_untouched() {
+        // A modern list cookie with an empty-string domain is not the
+        // upgrade's business; only dict-layout cookies are rewritten.
+        let source = concat!(
+            "{\"headers\": {\"X\": \"v\"},",
+            "\"cookies\": [{\"name\": \"a\", \"value\": \"1\", \"domain\": \"\", ",
+            "\"path\": \"/\", \"expires\": null, \"secure\": false}]}",
+        );
+        let mut session = Session::from_text(source, &dummy_path(), 0).unwrap();
+        session.upgrade_layout(Some("h.example"));
+        let text = session.to_json();
+        assert!(text.contains("\"domain\": \"\""), "{text}");
+        assert!(!text.contains("h.example"), "{text}");
+    }
+
+    #[test]
+    fn bump_version_overwrites_stored_stamp() {
+        let source = "{\"__meta__\": {\"furl\": \"0.0.1\"}}";
+        let mut session = Session::from_text(source, &dummy_path(), 0).unwrap();
+        session.bump_version();
+        let text = session.to_json();
+        assert!(text.contains(&format!("\"furl\": \"{}\"", crate::VERSION)));
+        assert!(!text.contains("\"furl\": \"0.0.1\""));
     }
 
     // ---- Header exclusion rules ------------------------------------------
